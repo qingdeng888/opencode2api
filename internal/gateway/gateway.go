@@ -68,11 +68,11 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 		return nil, err
 	}
 	cooldown := time.Duration(cfg.Performance.FailureCooldownSeconds) * time.Second
-	zenNodes, err := newNodePool(cfg.ZenKeys, transports, cooldown)
+	zenNodes, err := newNodePool(cfg.ZenKeys, transports, cooldown, cfg.UpstreamKeyBinding)
 	if err != nil {
 		return nil, fmt.Errorf("zen node pool: %w", err)
 	}
-	goNodes, err := newNodePool(cfg.GoKeys, transports, cooldown)
+	goNodes, err := newNodePool(cfg.GoKeys, transports, cooldown, cfg.UpstreamKeyBinding)
 	if err != nil {
 		return nil, fmt.Errorf("go node pool: %w", err)
 	}

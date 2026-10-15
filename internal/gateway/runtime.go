@@ -306,6 +306,8 @@ type KeyStatus struct {
 	Tier          string     `json:"tier"`
 	Index         int        `json:"index"`
 	ProxyIndex    int        `json:"proxy_index"`
+	ProxyMode     string     `json:"proxy_mode,omitempty"`
+	ProxyID       string     `json:"proxy_id,omitempty"`
 	Failures      uint32     `json:"failures"`
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 }
@@ -470,7 +472,10 @@ func (m *RuntimeManager) DebugRouteForTier(model string, tier config.Tier) (mode
 func keyStatuses(tier string, pool *nodePool) []KeyStatus {
 	result := make([]KeyStatus, 0, len(pool.nodes))
 	for _, node := range pool.nodes {
-		status := KeyStatus{ID: config.KeyDisplayID(node.key), Tier: tier, Index: node.index, ProxyIndex: int(node.proxyIndex.Load()), Failures: node.failures.Load()}
+		status := KeyStatus{ID: config.KeyDisplayID(node.key), Tier: tier, Index: node.index, ProxyIndex: int(node.proxyIndex.Load()), ProxyMode: node.proxyMode, Failures: node.failures.Load()}
+		if node.proxyMode == config.ProxyModeBind && status.ProxyIndex >= 0 && status.ProxyIndex < len(pool.transports.items) {
+			status.ProxyID = config.Fingerprint(pool.transports.items[status.ProxyIndex].name)
+		}
 		if until := node.cooldownUntil.Load(); until > time.Now().UnixNano() {
 			value := time.Unix(0, until).UTC()
 			status.CooldownUntil = &value

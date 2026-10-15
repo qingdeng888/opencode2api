@@ -946,7 +946,7 @@
                     <th>Tier</th>
                     <th>Key（掩码）</th>
                     <th>备注</th>
-                    <th>绑定代理</th>
+                    <th>绑定代理 / 模式</th>
                     <th>失败 / 冷却</th>
                     <th>创建时间</th>
                     <th>操作</th>
@@ -985,6 +985,13 @@
               <div class="field upk-grow">
                 <label>备注（可选，最多 80 字）</label
                 ><input id="upk-new-note" maxlength="80" placeholder="例如：主号 / 备用 / 某某渠道" />
+              </div>
+              <div class="field upk-grow">
+                <label>代理绑定（可稍后在列表修改）</label
+                ><select id="upk-new-proxy">
+                  <option value="auto">自动绑定</option>
+                  <option value="rotate">轮询</option>
+                </select>
               </div>
               <div class="field upk-btn">
                 <label>&nbsp;</label><button id="upk-add" class="primary">➕ 添加</button>

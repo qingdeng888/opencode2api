@@ -77,6 +77,7 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("GET /api/upstream-keys", a.authenticate(http.HandlerFunc(a.handleListUpstreamKeys)))
 	mux.Handle("POST /api/upstream-keys", a.authenticate(a.csrf(http.HandlerFunc(a.handleCreateUpstreamKey))))
 	mux.Handle("PATCH /api/upstream-keys/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleUpdateUpstreamKey))))
+	mux.Handle("POST /api/upstream-keys/{id}/proxy", a.authenticate(a.csrf(http.HandlerFunc(a.handleSetUpstreamKeyProxy))))
 	mux.Handle("DELETE /api/upstream-keys/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleDeleteUpstreamKey))))
 	mux.Handle("POST /api/upstream-keys/anonymous", a.authenticate(a.csrf(http.HandlerFunc(a.handleSetAnonymous))))
 	mux.Handle("GET /api/logs", a.authenticate(http.HandlerFunc(a.handleLogs)))

@@ -27,6 +27,8 @@ type UpstreamKeyView struct {
 	Note          string     `json:"note"`
 	Index         int        `json:"index"`
 	Proxy         string     `json:"proxy,omitempty"`
+	ProxyMode     string     `json:"proxy_mode"`
+	ProxyID       string     `json:"proxy_id,omitempty"`
 	Failures      uint32     `json:"failures"`
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 	CreatedAt     *time.Time `json:"created_at,omitempty"`
@@ -42,16 +44,20 @@ func (a *Server) upstreamKeyViews() ([]UpstreamKeyView, bool) {
 		live[key.Tier+":"+strconv.Itoa(key.Index)] = key
 	}
 	proxyAddr := make(map[int]string, len(resources.Proxies))
+	proxyIDByIndex := make(map[int]string, len(resources.Proxies))
 	for _, proxy := range resources.Proxies {
 		proxyAddr[proxy.Index] = proxy.Address
+		proxyIDByIndex[proxy.Index] = proxy.ID
 	}
 	views := make([]UpstreamKeyView, 0, len(cfg.ZenKeys)+len(cfg.GoKeys))
 	appendTier := func(tier string, keys []string) {
 		for i, key := range keys {
 			id := config.Fingerprint(key)
 			meta := cfg.UpstreamKeyMetadata[id]
+			mode, pinnedID := cfg.UpstreamKeyBinding(key)
 			view := UpstreamKeyView{
 				ID: id, Tier: tier, Display: config.MaskValue(key), Index: i, Note: meta.Note,
+				ProxyMode: mode, ProxyID: pinnedID,
 			}
 			if !meta.CreatedAt.IsZero() {
 				created := meta.CreatedAt
@@ -60,7 +66,22 @@ func (a *Server) upstreamKeyViews() ([]UpstreamKeyView, bool) {
 			if status, ok := live[tier+":"+strconv.Itoa(i)]; ok {
 				view.Failures = status.Failures
 				view.CooldownUntil = status.CooldownUntil
-				view.Proxy = proxyAddr[status.ProxyIndex]
+				switch mode {
+				case config.ProxyModeRotate:
+					view.Proxy = "轮询（每次请求取一个可用代理）"
+				case config.ProxyModeBind:
+					// Show the pinned proxy; if it vanished from the pool the
+					// runtime fell back to auto, so reflect the live binding.
+					if addr := proxyAddr[status.ProxyIndex]; addr != "" && proxyIDByIndex[status.ProxyIndex] == pinnedID {
+						view.Proxy = addr
+					} else {
+						view.Proxy = proxyAddr[status.ProxyIndex]
+						view.ProxyMode = config.ProxyModeAuto
+						view.ProxyID = ""
+					}
+				default:
+					view.Proxy = proxyAddr[status.ProxyIndex]
+				}
 			}
 			views = append(views, view)
 		}
@@ -72,8 +93,13 @@ func (a *Server) upstreamKeyViews() ([]UpstreamKeyView, bool) {
 
 func (a *Server) writeUpstreamKeyViews(w http.ResponseWriter) {
 	views, anonymous := a.upstreamKeyViews()
+	// The binding dropdown needs the enabled proxy pool as its option list.
+	var options []map[string]string
+	for _, proxy := range a.manager.Resources().Proxies {
+		options = append(options, map[string]string{"id": proxy.ID, "address": proxy.Address})
+	}
 	w.Header().Set("Cache-Control", "no-store")
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"keys": views, "anonymous": anonymous})
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"keys": views, "anonymous": anonymous, "proxies": options})
 }
 
 func (a *Server) handleListUpstreamKeys(w http.ResponseWriter, _ *http.Request) {
@@ -82,9 +108,11 @@ func (a *Server) handleListUpstreamKeys(w http.ResponseWriter, _ *http.Request) 
 
 func (a *Server) handleCreateUpstreamKey(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Tier  string `json:"tier"`
-		Value string `json:"value"`
-		Note  string `json:"note"`
+		Tier    string `json:"tier"`
+		Value   string `json:"value"`
+		Note    string `json:"note"`
+		Mode    string `json:"mode"`
+		ProxyID string `json:"proxy_id"`
 	}
 	if err := decodeAdminJSON(w, r, &input); err != nil {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -105,6 +133,24 @@ func (a *Server) handleCreateUpstreamKey(w http.ResponseWriter, r *http.Request)
 		writeAdminError(w, http.StatusBadRequest, "invalid_note", fmt.Sprintf("note must be at most %d characters", upstreamKeyNoteLimit))
 		return
 	}
+	mode := strings.TrimSpace(input.Mode)
+	if mode == "" {
+		mode = config.ProxyModeAuto
+	}
+	switch mode {
+	case config.ProxyModeAuto, config.ProxyModeBind, config.ProxyModeRotate:
+	default:
+		writeAdminError(w, http.StatusBadRequest, "invalid_proxy_mode", "mode must be auto, bind, or rotate")
+		return
+	}
+	proxyID := strings.TrimSpace(input.ProxyID)
+	if mode == config.ProxyModeBind && proxyID == "" {
+		writeAdminError(w, http.StatusBadRequest, "invalid_proxy_mode", "bind mode requires proxy_id")
+		return
+	}
+	if mode != config.ProxyModeBind {
+		proxyID = ""
+	}
 	_, err := a.manager.Update(func(cfg *config.Config) error {
 		keys := &cfg.ZenKeys
 		if tier == string(config.TierGo) {
@@ -114,6 +160,9 @@ func (a *Server) handleCreateUpstreamKey(w http.ResponseWriter, r *http.Request)
 			if existing == value {
 				return fmt.Errorf("该 %s Key 已存在（尾码 %s）", strings.ToUpper(tier), config.MaskValue(value))
 			}
+		}
+		if proxyID != "" && !proxyIDInPool(cfg, proxyID) {
+			return fmt.Errorf("proxy %q 不在当前代理池中（可能已删除或停用）", proxyID)
 		}
 		*keys = append(*keys, value)
 		id := config.Fingerprint(value)
@@ -125,6 +174,11 @@ func (a *Server) handleCreateUpstreamKey(w http.ResponseWriter, r *http.Request)
 			meta.CreatedAt = time.Now().UTC()
 		}
 		meta.Note = note
+		if mode == config.ProxyModeAuto {
+			meta.ProxyMode, meta.ProxyID = "", ""
+		} else {
+			meta.ProxyMode, meta.ProxyID = mode, proxyID
+		}
 		cfg.UpstreamKeyMetadata[id] = meta
 		return nil
 	})
@@ -132,8 +186,20 @@ func (a *Server) handleCreateUpstreamKey(w http.ResponseWriter, r *http.Request)
 		writeAdminError(w, http.StatusBadRequest, "upstream_key_add_failed", a.manager.Redact(err.Error()))
 		return
 	}
-	a.logger.Info("upstream key added", "component", "upstream_keys", "event", "upstream_key_added", "tier", tier, "key", config.MaskValue(value), "client_ip", clientIP(r))
+	a.logger.Info("upstream key added", "component", "upstream_keys", "event", "upstream_key_added", "tier", tier, "key", config.MaskValue(value), "mode", mode, "client_ip", clientIP(r))
 	a.writeUpstreamKeyViews(w)
+}
+
+// proxyIDInPool reports whether a proxy fingerprint is in the effective pool
+// (config + proxyfile, minus disabled entries), so a key can only be pinned to
+// a proxy that will actually be built into the transport pool.
+func proxyIDInPool(cfg *config.Config, proxyID string) bool {
+	for _, value := range cfg.RuntimeProxies() {
+		if config.Fingerprint(value) == proxyID {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Server) handleUpdateUpstreamKey(w http.ResponseWriter, r *http.Request) {
@@ -216,6 +282,72 @@ func (a *Server) handleDeleteUpstreamKey(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	a.logger.Info("upstream key deleted", "component", "upstream_keys", "event", "upstream_key_deleted", "tier", removedTier, "key", removedDisplay, "client_ip", clientIP(r))
+	a.writeUpstreamKeyViews(w)
+}
+
+// handleSetUpstreamKeyProxy changes one key's proxy binding mode: "auto"
+// (static i%N binding with failover), "rotate" (pick a healthy proxy per
+// request), or "bind" pinned to proxy_id. The change goes through the normal
+// Update path, so the pool is rebuilt and takes effect immediately.
+func (a *Server) handleSetUpstreamKeyProxy(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", "key id is required")
+		return
+	}
+	var input struct {
+		Mode    string `json:"mode"`
+		ProxyID string `json:"proxy_id"`
+	}
+	if err := decodeAdminJSON(w, r, &input); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	mode := strings.TrimSpace(input.Mode)
+	if mode == "" {
+		mode = config.ProxyModeAuto
+	}
+	switch mode {
+	case config.ProxyModeAuto, config.ProxyModeBind, config.ProxyModeRotate:
+	default:
+		writeAdminError(w, http.StatusBadRequest, "invalid_proxy_mode", "mode must be auto, bind, or rotate")
+		return
+	}
+	proxyID := strings.TrimSpace(input.ProxyID)
+	if mode == config.ProxyModeBind && proxyID == "" {
+		writeAdminError(w, http.StatusBadRequest, "invalid_proxy_mode", "bind mode requires proxy_id")
+		return
+	}
+	if mode != config.ProxyModeBind {
+		proxyID = ""
+	}
+	_, err := a.manager.Update(func(cfg *config.Config) error {
+		if !hasUpstreamKeyID(cfg, id) {
+			return fmt.Errorf("key %q 不存在或已被删除", id)
+		}
+		if proxyID != "" && !proxyIDInPool(cfg, proxyID) {
+			return fmt.Errorf("proxy %q 不在当前代理池中（可能已删除或停用）", proxyID)
+		}
+		if cfg.UpstreamKeyMetadata == nil {
+			cfg.UpstreamKeyMetadata = map[string]config.UpstreamKeyMetadata{}
+		}
+		meta := cfg.UpstreamKeyMetadata[id]
+		if meta.CreatedAt.IsZero() {
+			meta.CreatedAt = time.Now().UTC()
+		}
+		if mode == config.ProxyModeAuto {
+			meta.ProxyMode, meta.ProxyID = "", ""
+		} else {
+			meta.ProxyMode, meta.ProxyID = mode, proxyID
+		}
+		cfg.UpstreamKeyMetadata[id] = meta
+		return nil
+	})
+	if err != nil {
+		writeAdminError(w, http.StatusBadRequest, "upstream_key_proxy_failed", a.manager.Redact(err.Error()))
+		return
+	}
+	a.logger.Info("upstream key proxy binding updated", "component", "upstream_keys", "event", "upstream_key_proxy_updated", "key_id", id, "mode", mode, "proxy_id", proxyID, "client_ip", clientIP(r))
 	a.writeUpstreamKeyViews(w)
 }
 

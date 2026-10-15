@@ -1099,6 +1099,18 @@ textarea {
 .upk-grow {
   min-width: 0;
 }
+.upk-proxy-select {
+  max-width: 260px;
+  padding: 5px 28px 5px 9px;
+  font-size: 12px;
+}
+.upk-proxy-now {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text2);
+  overflow-wrap: anywhere;
+  max-width: 260px;
+}
 
 /* ===== 代理管理 ===== */
 .conn-stats {

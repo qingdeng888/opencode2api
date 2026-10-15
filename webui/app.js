@@ -656,11 +656,13 @@ $("#proxy-bulk-run").onclick = async () => {
 $("#proxy-refresh").onclick = () => loadProxies();
 
 /* ===== 上游 Key 管理（独立页）：Zen / Go Key 列表、备注、增删、匿名开关 ===== */
-let upstreamKeyData = [];
+let upstreamKeyData = [],
+  upstreamProxyOptions = [];
 async function loadUpstreamKeys(silent = false) {
   try {
     const data = await api("/api/upstream-keys");
     upstreamKeyData = data.keys || [];
+    upstreamProxyOptions = data.proxies || [];
     renderUpstreamKeys(data);
     if (!silent) $("#upk-error").textContent = "";
   } catch (error) {
@@ -670,12 +672,52 @@ async function loadUpstreamKeys(silent = false) {
     }
   }
 }
+/* 收集 <select> 的候选值；浏览器里 options 总是存在，回退分支让无头测试
+   也能跑（假 DOM 只有 children/optgroup 树）。 */
+function selectOptionValues(select) {
+  if (!select) return [];
+  if (select.options) return [...select.options].map((option) => option.value);
+  const out = [];
+  const walk = (nodes) => {
+    (nodes || []).forEach((node) => {
+      if (node.value !== undefined) out.push(node.value);
+      if (node.children) walk(node.children);
+    });
+  };
+  walk(select.children);
+  return out;
+}
+
 function renderUpstreamKeys(data = {}) {
   const anon = $("#upk-anonymous");
   if (anon) {
     const checked = !!data.anonymous;
     // 用户正在切换时不覆盖控件状态，避免闪烁。
     if (!anon.dataset.busy) anon.checked = checked;
+  }
+  // 添加表单里的绑定下拉也同步最新代理池（保留当前选择）。
+  const newProxy = $("#upk-new-proxy");
+  if (newProxy) {
+    const selected = newProxy.value;
+    newProxy.replaceChildren();
+    const addOption = (value, label) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      newProxy.appendChild(option);
+    };
+    addOption("auto", "自动绑定");
+    addOption("rotate", "轮询");
+    const group = document.createElement("optgroup");
+    group.label = "指定代理";
+    upstreamProxyOptions.forEach((proxy) => {
+      const option = document.createElement("option");
+      option.value = `bind:${proxy.id}`;
+      option.textContent = proxy.address;
+      group.appendChild(option);
+    });
+    newProxy.appendChild(group);
+    if (selectOptionValues(newProxy).includes(selected)) newProxy.value = selected;
   }
   const rows = $("#upk-rows");
   rows.replaceChildren();
@@ -725,7 +767,50 @@ function renderUpstreamKeys(data = {}) {
       noteCell.textContent = key.note || "—";
     }
     row.appendChild(noteCell);
-    appendCell(row, key.proxy || "—", "mono");
+    // 绑定代理：模式下拉（自动 / 轮询 / 指定某个代理），改选即热生效。
+    const proxyCell = document.createElement("td");
+    const modeSelect = document.createElement("select");
+    modeSelect.className = "upk-proxy-select";
+    modeSelect.title = "自动=按顺序绑定并可故障迁移；轮询=每次请求从池中取一个可用代理；指定=钉死某个代理";
+    const addOption = (value, label) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      modeSelect.appendChild(option);
+    };
+    addOption("auto", "自动绑定");
+    addOption("rotate", "轮询");
+    const group = document.createElement("optgroup");
+    group.label = "指定代理";
+    upstreamProxyOptions.forEach((proxy) => {
+      const option = document.createElement("option");
+      option.value = `bind:${proxy.id}`;
+      option.textContent = proxy.address;
+      group.appendChild(option);
+    });
+    modeSelect.appendChild(group);
+    const currentMode = key.proxy_mode || "auto";
+    modeSelect.value =
+      currentMode === "bind" && key.proxy_id ? `bind:${key.proxy_id}` : currentMode === "rotate" ? "rotate" : "auto";
+    if (modeSelect.value === "" && currentMode === "bind") {
+      // 钉住的代理已被删除/停用：显示实际回退情况
+      addOption("bind:missing", `指定（已失效，实际走 ${key.proxy || "自动"}）`);
+      modeSelect.value = "bind:missing";
+    }
+    modeSelect.onchange = () => setUpstreamKeyProxy(key, modeSelect);
+    proxyCell.appendChild(modeSelect);
+    if (key.proxy && currentMode !== "rotate") {
+      const shown = document.createElement("div");
+      shown.className = "upk-proxy-now mono";
+      shown.textContent = `当前：${key.proxy}`;
+      proxyCell.appendChild(shown);
+    } else if (currentMode === "rotate") {
+      const shown = document.createElement("div");
+      shown.className = "upk-proxy-now";
+      shown.textContent = "每次请求取一个可用代理";
+      proxyCell.appendChild(shown);
+    }
+    row.appendChild(proxyCell);
     const cooldown = key.cooldown_until
       ? `冷却至 ${new Date(key.cooldown_until).toLocaleTimeString()}`
       : key.failures
@@ -758,6 +843,43 @@ function renderUpstreamKeys(data = {}) {
   if (!upstreamKeyData.length)
     emptyRow(rows, 7, "暂无上游 Key：匿名通道开启时免费模型仍可用，添加 Key 可获得独立配额兜底。");
 }
+async function setUpstreamKeyProxy(key, select) {
+  const value = select.value;
+  if (value === "bind:missing") {
+    toast("该 Key 钉住的代理已不存在，请重新选择", true);
+    renderUpstreamKeys({ anonymous: $("#upk-anonymous")?.checked });
+    return;
+  }
+  let mode = "auto",
+    proxyId = "";
+  if (value === "rotate") mode = "rotate";
+  else if (value.startsWith("bind:")) {
+    mode = "bind";
+    proxyId = value.slice(5);
+  }
+  select.disabled = true;
+  try {
+    const data = await api(`/api/upstream-keys/${key.id}/proxy`, {
+      method: "POST",
+      body: JSON.stringify({ mode, proxy_id: proxyId }),
+    });
+    upstreamKeyData = data.keys || [];
+    if (data.proxies) upstreamProxyOptions = data.proxies;
+    renderUpstreamKeys(data);
+    refreshMonitor().catch(() => {});
+    toast(
+      mode === "rotate"
+        ? "已切换为轮询：每次请求从代理池取一个可用代理"
+        : mode === "bind"
+          ? "已钉住指定代理"
+          : "已恢复自动绑定",
+    );
+  } catch (error) {
+    toast(error.message, true);
+    select.disabled = false;
+    loadUpstreamKeys(true);
+  }
+}
 async function deleteUpstreamKey(key) {
   const label = key.note ? `${key.tier.toUpperCase()} · ${key.display}（${key.note}）` : `${key.tier.toUpperCase()} · ${key.display}`;
   if (!confirm(`删除上游 Key ${label}？\n关闭匿名通道且这是最后一个 Key 时，网关会拒绝保存以保护路由。`)) return;
@@ -778,6 +900,15 @@ $("#upk-add").onclick = async () => {
     toast("请填写 Key", true);
     return;
   }
+  // 解析代理绑定下拉：auto / rotate / bind:<proxyId>
+  const proxyChoice = $("#upk-new-proxy")?.value || "auto";
+  let mode = "auto",
+    proxyId = "";
+  if (proxyChoice === "rotate") mode = "rotate";
+  else if (proxyChoice.startsWith("bind:")) {
+    mode = "bind";
+    proxyId = proxyChoice.slice(5);
+  }
   try {
     const data = await api("/api/upstream-keys", {
       method: "POST",
@@ -785,9 +916,12 @@ $("#upk-add").onclick = async () => {
         tier: $("#upk-new-tier").value,
         value,
         note: $("#upk-new-note").value.trim(),
+        mode,
+        proxy_id: proxyId,
       }),
     });
     upstreamKeyData = data.keys || [];
+    if (data.proxies) upstreamProxyOptions = data.proxies;
     $("#upk-new-value").value = "";
     $("#upk-new-note").value = "";
     renderUpstreamKeys(data);

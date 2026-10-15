@@ -299,21 +299,27 @@ type upstreamNode struct {
 	proxyIndex     atomic.Int64
 	failures       atomic.Uint32
 	cooldownUntil  atomic.Int64
+	// proxyMode is "" / config.ProxyModeAuto for the historical static
+	// binding, config.ProxyModeBind for an operator-pinned proxy, or
+	// config.ProxyModeRotate for a fresh healthy pick on every attempt.
+	proxyMode string
 }
 
 type nodePool struct {
 	nodes        []*upstreamNode
 	transports   *transportPool
 	next         atomic.Uint64
+	rotateNext   atomic.Uint64
 	cooldown     time.Duration
 	bindingsMu   sync.Mutex
 	bindingCount []int
 }
 
-// newNodePool distributes keys over proxies in round-robin order. When there
-// are fewer keys than proxies, the remaining proxies are intentionally idle and
-// can take over a key immediately if an active proxy fails.
-func newNodePool(keys []string, transports *transportPool, cooldown time.Duration) (*nodePool, error) {
+// newNodePool distributes keys over proxies according to each key's binding
+// mode. Auto keys take round-robin positions (i % N); when there are fewer
+// keys than proxies, the remaining proxies stay idle as failover targets.
+// Bind keys pin one proxy; rotate keys pick a healthy proxy per attempt.
+func newNodePool(keys []string, transports *transportPool, cooldown time.Duration, binding func(key string) (string, string)) (*nodePool, error) {
 	if transports == nil || len(transports.items) == 0 {
 		return nil, fmt.Errorf("at least one proxy transport is required")
 	}
@@ -327,8 +333,32 @@ func newNodePool(keys []string, transports *transportPool, cooldown time.Duratio
 		return pool, nil
 	}
 	for i, key := range keys {
+		node := &upstreamNode{key: key, index: i}
+		mode, proxyID := "", ""
+		if binding != nil {
+			mode, proxyID = binding(key)
+		}
+		switch mode {
+		case config.ProxyModeBind:
+			if idx := transports.indexByID(proxyID); idx >= 0 {
+				node.proxyMode = config.ProxyModeBind
+				node.preferredProxy = idx
+				node.proxyIndex.Store(int64(idx))
+				pool.nodes = append(pool.nodes, node)
+				pool.bindingCount[idx]++
+				continue
+			}
+			// The pinned proxy no longer exists; fall through to the
+			// historical auto binding so the key keeps working.
+		case config.ProxyModeRotate:
+			node.proxyMode = config.ProxyModeRotate
+			node.preferredProxy = -1
+			node.proxyIndex.Store(-1)
+			pool.nodes = append(pool.nodes, node)
+			continue
+		}
 		proxyIndex := i % len(transports.items)
-		node := &upstreamNode{key: key, index: i, preferredProxy: proxyIndex}
+		node.preferredProxy = proxyIndex
 		node.proxyIndex.Store(int64(proxyIndex))
 		pool.nodes = append(pool.nodes, node)
 		pool.bindingCount[proxyIndex]++
@@ -336,9 +366,50 @@ func newNodePool(keys []string, transports *transportPool, cooldown time.Duratio
 	return pool, nil
 }
 
+// indexByID resolves a proxy fingerprint to its pool position.
+func (p *transportPool) indexByID(id string) int {
+	if p == nil || id == "" {
+		return -1
+	}
+	for _, proxy := range p.items {
+		if config.Fingerprint(proxy.name) == id {
+			return proxy.index
+		}
+	}
+	return -1
+}
+
+// nextRotateProxy advances the shared rotation cursor and returns the first
+// healthy proxy from there. When every proxy is unhealthy it still returns one
+// so the attempt can fail visibly and trigger health recovery.
+func (p *nodePool) nextRotateProxy() *proxyTransport {
+	n := len(p.transports.items)
+	if n == 0 {
+		return nil
+	}
+	start := int((p.rotateNext.Add(1) - 1) % uint64(n))
+	for i := 0; i < n; i++ {
+		candidate := p.transports.items[(start+i)%n]
+		if candidate.healthy.Load() {
+			return candidate
+		}
+	}
+	return p.transports.items[start]
+}
+
+// stillBound reports whether node is statically bound to proxy. Rotate nodes
+// are never "still bound" (their proxy changes per attempt), so a proxy
+// failure never cools the key down in rotate mode.
+func (p *nodePool) stillBound(node *upstreamNode, proxy *proxyTransport) bool {
+	if node == nil || node.proxyMode == config.ProxyModeRotate {
+		return false
+	}
+	return p.Proxy(node) == proxy
+}
+
 // RestoreProxy moves keys that were originally assigned to a recovered proxy
 // back to it. Proxies without an original key simply become healthy failover
-// candidates again.
+// candidates again. Pinned (bind) and rotating keys never move.
 func (p *nodePool) RestoreProxy(recoveredProxy int) int {
 	if p == nil || p.transports == nil || recoveredProxy < 0 || recoveredProxy >= len(p.transports.items) {
 		return 0
@@ -348,6 +419,9 @@ func (p *nodePool) RestoreProxy(recoveredProxy int) int {
 
 	moved := 0
 	for _, node := range p.nodes {
+		if node.proxyMode != "" {
+			continue
+		}
 		current := int(node.proxyIndex.Load())
 		if node.preferredProxy != recoveredProxy || current == recoveredProxy {
 			continue
@@ -384,6 +458,9 @@ func (p *nodePool) Proxy(node *upstreamNode) *proxyTransport {
 	if p == nil || node == nil || p.transports == nil {
 		return nil
 	}
+	if node.proxyMode == config.ProxyModeRotate {
+		return p.nextRotateProxy()
+	}
 	index := int(node.proxyIndex.Load())
 	if index < 0 || index >= len(p.transports.items) {
 		return nil
@@ -391,10 +468,11 @@ func (p *nodePool) Proxy(node *upstreamNode) *proxyTransport {
 	return p.transports.items[index]
 }
 
-// RebindProxy moves every key currently using failedProxy to the least-loaded
-// healthy proxy. Empty proxies are selected in configuration order; otherwise
-// one of the least-loaded proxies is chosen at random. If every alternative is
-// currently unhealthy, it still attempts the least-loaded alternative.
+// RebindProxy moves every auto-bound key currently using failedProxy to the
+// least-loaded healthy proxy. Empty proxies are selected in configuration
+// order; otherwise one of the least-loaded proxies is chosen at random. If
+// every alternative is currently unhealthy, it still attempts the least-loaded
+// alternative. Operator-pinned and rotating keys are left untouched.
 func (p *nodePool) RebindProxy(failedProxy int) int {
 	if p == nil || p.transports == nil || len(p.transports.items) < 2 || failedProxy < 0 || failedProxy >= len(p.transports.items) {
 		return 0
@@ -404,6 +482,9 @@ func (p *nodePool) RebindProxy(failedProxy int) int {
 
 	moved := 0
 	for _, node := range p.nodes {
+		if node.proxyMode != "" {
+			continue
+		}
 		if int(node.proxyIndex.Load()) != failedProxy {
 			continue
 		}
