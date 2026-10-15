@@ -210,6 +210,11 @@ func (m *RuntimeManager) applyLocked(candidate config.Config, persist bool) (App
 
 	current := m.current.Load()
 	hadPlaintextPassword := candidate.WebUI.Password != ""
+	if candidate.UpstreamKeyMetadata == nil && current != nil {
+		// Config API payloads never carry upstream key notes; keep whatever is
+		// already persisted so a config save cannot wipe them.
+		candidate.UpstreamKeyMetadata = current.config.UpstreamKeyMetadata
+	}
 	if hadPlaintextPassword {
 		hash, err := config.HashPassword(candidate.WebUI.Password)
 		if err != nil {
@@ -398,6 +403,7 @@ type DebugKeyView struct {
 	ID            string      `json:"id"`
 	Tier          config.Tier `json:"tier"`
 	Display       string      `json:"display"`
+	Note          string      `json:"note,omitempty"`
 	Index         int         `json:"index"`
 	Failures      uint32      `json:"failures"`
 	CooldownUntil *time.Time  `json:"cooldown_until,omitempty"`
@@ -415,6 +421,7 @@ func (m *RuntimeManager) DebugKeys() map[string][]DebugKeyView {
 		for _, node := range nodes {
 			view := DebugKeyView{
 				ID: config.Fingerprint(node.key), Tier: tier, Display: config.MaskValue(node.key),
+				Note:  runtime.gateway.cfg.UpstreamKeyNote(node.key),
 				Index: node.index, Failures: node.failures.Load(),
 			}
 			if until := node.cooldownUntil.Load(); until > time.Now().UnixNano() {

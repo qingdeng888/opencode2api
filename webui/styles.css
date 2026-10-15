@@ -1086,6 +1086,20 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+/* ===== 上游 Key 管理 ===== */
+.upk-add {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1.2fr) minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+}
+.upk-add .field {
+  margin: 0;
+}
+.upk-grow {
+  min-width: 0;
+}
+
 /* ===== 代理管理 ===== */
 .conn-stats {
   display: grid;
@@ -1285,6 +1299,9 @@ html:not([data-theme="dark"]) .theme-toggle .dark-label {
   }
 }
 @media (max-width: 680px) {
+  .upk-add {
+    grid-template-columns: 1fr;
+  }
   .conn-stats {
     grid-template-columns: repeat(2, 1fr);
   }

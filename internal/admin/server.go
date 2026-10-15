@@ -74,6 +74,11 @@ func (a *Server) Handler() http.Handler {
 	mux.Handle("POST /api/proxies/delete", a.authenticate(a.csrf(http.HandlerFunc(a.handleDeleteProxiesBulk))))
 	mux.Handle("POST /api/proxies/enabled", a.authenticate(a.csrf(http.HandlerFunc(a.handleSetProxiesEnabled))))
 	mux.Handle("POST /api/proxies/{id}/test", a.authenticate(a.csrf(http.HandlerFunc(a.handleTestProxy))))
+	mux.Handle("GET /api/upstream-keys", a.authenticate(http.HandlerFunc(a.handleListUpstreamKeys)))
+	mux.Handle("POST /api/upstream-keys", a.authenticate(a.csrf(http.HandlerFunc(a.handleCreateUpstreamKey))))
+	mux.Handle("PATCH /api/upstream-keys/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleUpdateUpstreamKey))))
+	mux.Handle("DELETE /api/upstream-keys/{id}", a.authenticate(a.csrf(http.HandlerFunc(a.handleDeleteUpstreamKey))))
+	mux.Handle("POST /api/upstream-keys/anonymous", a.authenticate(a.csrf(http.HandlerFunc(a.handleSetAnonymous))))
 	mux.Handle("GET /api/logs", a.authenticate(http.HandlerFunc(a.handleLogs)))
 	mux.Handle("GET /api/logs/stream", a.authenticate(http.HandlerFunc(a.handleLogStream)))
 	mux.Handle("/", a.staticHandler())
@@ -153,12 +158,16 @@ type SecretInput struct {
 }
 
 type ConfigUpdate struct {
-	Listen      string                   `json:"listen"`
-	ServerKeys  []SecretInput            `json:"server_keys"`
-	ZenKeys     []SecretInput            `json:"zen_keys"`
-	GoKeys      []SecretInput            `json:"go_keys"`
-	Anonymous   bool                     `json:"anonymous"`
-	Proxies     []SecretInput            `json:"proxies"`
+	Listen string `json:"listen"`
+	// Pointer slices distinguish "field omitted" (keep the current value, so a
+	// stale or partial client can never wipe keys) from an explicit empty list
+	// (clear everything). Server keys live on the API Key page and zen/go keys
+	// on the upstream key page; the config center only submits what it renders.
+	ServerKeys  *[]SecretInput           `json:"server_keys,omitempty"`
+	ZenKeys     *[]SecretInput           `json:"zen_keys,omitempty"`
+	GoKeys      *[]SecretInput           `json:"go_keys,omitempty"`
+	Anonymous   *bool                    `json:"anonymous,omitempty"`
+	Proxies     *[]SecretInput           `json:"proxies,omitempty"`
 	ProxyFile   string                   `json:"proxyfile"`
 	Upstream    config.UpstreamConfig    `json:"upstream"`
 	Retry       config.RetryConfig       `json:"retry"`
@@ -184,34 +193,47 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	current := a.manager.Config()
-	serverKeys, err := resolveSecrets(update.ServerKeys, current.ServerKeys)
-	if err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid_server_keys", err.Error())
-		return
+	// Omitted list fields keep the current values verbatim; only an explicitly
+	// submitted list is resolved (by id or value) and replaced.
+	serverKeys, zenKeys, goKeys, proxies := current.ServerKeys, current.ZenKeys, current.GoKeys, current.Proxies
+	var err error
+	if update.ServerKeys != nil {
+		if serverKeys, err = resolveSecrets(*update.ServerKeys, current.ServerKeys); err != nil {
+			writeAdminError(w, http.StatusBadRequest, "invalid_server_keys", err.Error())
+			return
+		}
 	}
-	zenKeys, err := resolveSecrets(update.ZenKeys, current.ZenKeys)
-	if err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid_zen_keys", err.Error())
-		return
+	if update.ZenKeys != nil {
+		if zenKeys, err = resolveSecrets(*update.ZenKeys, current.ZenKeys); err != nil {
+			writeAdminError(w, http.StatusBadRequest, "invalid_zen_keys", err.Error())
+			return
+		}
 	}
-	goKeys, err := resolveSecrets(update.GoKeys, current.GoKeys)
-	if err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid_go_keys", err.Error())
-		return
+	if update.GoKeys != nil {
+		if goKeys, err = resolveSecrets(*update.GoKeys, current.GoKeys); err != nil {
+			writeAdminError(w, http.StatusBadRequest, "invalid_go_keys", err.Error())
+			return
+		}
 	}
-	proxies, err := resolveSecrets(update.Proxies, current.Proxies)
-	if err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid_proxies", err.Error())
-		return
+	if update.Proxies != nil {
+		if proxies, err = resolveSecrets(*update.Proxies, current.Proxies); err != nil {
+			writeAdminError(w, http.StatusBadRequest, "invalid_proxies", err.Error())
+			return
+		}
+	}
+	anonymous := current.Anonymous
+	if update.Anonymous != nil {
+		anonymous = *update.Anonymous
 	}
 	reasoning := current.Reasoning
 	if update.Reasoning != nil {
 		reasoning = *update.Reasoning
 	}
 	candidate := config.Config{
-		ServerKeyMetadata: current.ServerKeyMetadata,
-		Rotation:          current.Rotation,
-		Listen:            update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: update.Anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
+		ServerKeyMetadata:   current.ServerKeyMetadata,
+		UpstreamKeyMetadata: current.UpstreamKeyMetadata,
+		Rotation:            current.Rotation,
+		Listen:              update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
 		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},

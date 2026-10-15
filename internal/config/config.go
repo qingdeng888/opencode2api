@@ -22,21 +22,25 @@ type Config struct {
 	ServerKeyMetadata map[string]ServerKeyMetadata `json:"server_key_metadata,omitempty"`
 	ZenKeys           []string                     `json:"zen_keys"`
 	GoKeys            []string                     `json:"go_keys"`
-	Anonymous         bool                         `json:"anonymous"`
-	Proxies           []string                     `json:"proxies"`
-	ProxyFile         string                       `json:"proxyfile"`
+	// UpstreamKeyMetadata is keyed by the upstream key fingerprint and stores
+	// the operator note ("主号", "备用") plus creation time. The secret values
+	// themselves stay in zen_keys/go_keys.
+	UpstreamKeyMetadata map[string]UpstreamKeyMetadata `json:"upstream_key_metadata,omitempty"`
+	Anonymous           bool                           `json:"anonymous"`
+	Proxies             []string                       `json:"proxies"`
+	ProxyFile           string                         `json:"proxyfile"`
 	// DisabledProxies holds fingerprints of config.json proxies the operator
 	// disabled in the proxy page. Entries stay in Proxies (so edits there keep
 	// working) but are excluded from the runtime pool, like disabled server keys.
-	DisabledProxies map[string]bool `json:"disabled_proxies,omitempty"`
-	Upstream          UpstreamConfig               `json:"upstream"`
-	Retry             RetryConfig                  `json:"retry"`
-	Models            ModelsConfig                 `json:"models"`
-	Performance       PerformanceConfig            `json:"performance"`
-	Logging           LoggingConfig                `json:"logging"`
-	WebUI             WebUIConfig                  `json:"webui"`
-	Prefer            Tier                         `json:"prefer"`
-	Reasoning         ReasoningConfig              `json:"reasoning"`
+	DisabledProxies map[string]bool   `json:"disabled_proxies,omitempty"`
+	Upstream        UpstreamConfig    `json:"upstream"`
+	Retry           RetryConfig       `json:"retry"`
+	Models          ModelsConfig      `json:"models"`
+	Performance     PerformanceConfig `json:"performance"`
+	Logging         LoggingConfig     `json:"logging"`
+	WebUI           WebUIConfig       `json:"webui"`
+	Prefer          Tier              `json:"prefer"`
+	Reasoning       ReasoningConfig   `json:"reasoning"`
 
 	effectiveProxies []string
 	// proxyFileEntries caches the proxyfile-resolved entries at Normalize time
@@ -382,6 +386,13 @@ func Clone(cfg Config) Config {
 		metadata[id] = item
 	}
 	cfg.ServerKeyMetadata = metadata
+	if cfg.UpstreamKeyMetadata != nil {
+		upstreamMeta := make(map[string]UpstreamKeyMetadata, len(cfg.UpstreamKeyMetadata))
+		for id, item := range cfg.UpstreamKeyMetadata {
+			upstreamMeta[id] = item
+		}
+		cfg.UpstreamKeyMetadata = upstreamMeta
+	}
 	cfg.ZenKeys = append([]string(nil), cfg.ZenKeys...)
 	cfg.GoKeys = append([]string(nil), cfg.GoKeys...)
 	cfg.Proxies = append([]string(nil), cfg.Proxies...)

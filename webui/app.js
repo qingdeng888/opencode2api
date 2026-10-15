@@ -15,6 +15,7 @@ const pages = {
   availability: ["13", "免费模型可用性", "每小时探测，手动控制的模型不受影响。"],
   rotation: ["12", "模型轮转", "共享当前模型、故障切换与尝试记录。"],
   proxies: ["14", "代理管理", "出站代理池的新增、删除与逐个连通性测试。"],
+  "upstream-keys": ["15", "上游 Key 管理", "Zen / Go 上游凭证、备注与匿名通道开关。"],
   overview: ["01", "运行桌面", "最近一小时、进程累计与当前资源状态。"],
   guide: ["02", "首次运行", "用六个检查点完成从配置到首个请求。"],
   access: ["03", "接入手册", "Chat、Responses、Anthropic 与 SDK 示例。"],
@@ -122,6 +123,7 @@ function openPage(page) {
   }
   if (page === "rotation") loadRotation();
   if (page === "proxies") loadProxies();
+  if (page === "upstream-keys") loadUpstreamKeys();
   if (page === "availability") loadAvailability();
   if (page === "api-keys") loadAPIKeys();
   if (page === "playground" && !debugData) loadDebugModels();
@@ -142,7 +144,6 @@ function fillConfig(value) {
   $("#c-web-listen").value = value.webui.listen;
   $("#c-session").value = value.webui.session_ttl_minutes;
   $("#c-web-enabled").checked = value.webui.enabled;
-  $("#c-anonymous").checked = !!value.anonymous;
   $("#c-proxyfile").value = value.proxyfile;
   $("#c-up-zen").value = value.upstream.zen;
   $("#c-up-go").value = value.upstream.go;
@@ -165,58 +166,21 @@ function fillConfig(value) {
   $("#c-level").value = value.logging.level;
   $("#c-ring").value = value.logging.ring_size;
   $("#c-dump-bodies").checked = !!value.logging.dump_request_bodies;
-  ["server_keys", "zen_keys", "go_keys", "proxies"].forEach(renderChips);
   const notice = $("#restart-notice");
   if (value.restart_required_fields?.length) {
     notice.textContent = `已保存但尚未生效：${value.restart_required_fields.join(", ")}。当前 API ${value.effective.listen}、WebUI ${value.effective.webui_listen}。请重启进程。`;
     notice.classList.remove("hidden");
   } else notice.classList.add("hidden");
 }
-function renderChips(name) {
-  const host = $(`#${name}-chips`);
-  if (!host) return;
-  host.replaceChildren();
-  (config[name] || []).forEach((item) => {
-    const chip = document.createElement("span"),
-      text = document.createElement("span"),
-      remove = document.createElement("button");
-    chip.className = "chip";
-    chip.dataset.id = item.id;
-    text.textContent = item.display;
-    remove.type = "button";
-    remove.title = "移除";
-    remove.textContent = "×";
-    remove.onclick = () => chip.remove();
-    chip.append(text, remove);
-    host.appendChild(chip);
-  });
-}
-function secretInputs(name) {
-  const host = $(`#${name}-chips`);
-  const kept = host
-    ? [...host.children].map((node) => ({ id: node.dataset.id }))
-    : (config[name] || []).map((item) => ({ id: item.id }));
-  const addedEl = $(`#${name}-new`);
-  const added = addedEl
-    ? addedEl.value
-        .split(/\r?\n/)
-        .map((value) => value.trim())
-        .filter(Boolean)
-        .map((value) => ({ value }))
-    : [];
-  return kept.concat(added);
-}
 const number = (id) => Number($(id).value);
 $("#config-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
+    // server_keys / zen_keys / go_keys / anonymous / proxies are intentionally
+    // omitted: the backend keeps the current values for absent list fields,
+    // and those secrets are owned by the API Key / upstream key / proxy pages.
     const update = {
       listen: $("#c-listen").value,
-      server_keys: secretInputs("server_keys"),
-      zen_keys: secretInputs("zen_keys"),
-      go_keys: secretInputs("go_keys"),
-      anonymous: $("#c-anonymous").checked,
-      proxies: secretInputs("proxies"),
       proxyfile: $("#c-proxyfile").value,
       prefer: $("#c-prefer").value,
       upstream: { zen: $("#c-up-zen").value, go: $("#c-up-go").value },
@@ -254,10 +218,6 @@ $("#config-form").addEventListener("submit", async (event) => {
     };
     const result = await api("/api/config", { method: "PUT", body: JSON.stringify(update) });
     config = result.config;
-    ["server_keys", "zen_keys", "go_keys", "proxies"].forEach((name) => {
-      const el = $(`#${name}-new`);
-      if (el) el.value = "";
-    });
     fillConfig(config);
     await loadDebugModels();
     await loadProxies(true);
@@ -695,6 +655,172 @@ $("#proxy-bulk-run").onclick = async () => {
 };
 $("#proxy-refresh").onclick = () => loadProxies();
 
+/* ===== 上游 Key 管理（独立页）：Zen / Go Key 列表、备注、增删、匿名开关 ===== */
+let upstreamKeyData = [];
+async function loadUpstreamKeys(silent = false) {
+  try {
+    const data = await api("/api/upstream-keys");
+    upstreamKeyData = data.keys || [];
+    renderUpstreamKeys(data);
+    if (!silent) $("#upk-error").textContent = "";
+  } catch (error) {
+    if (!silent) {
+      $("#upk-error").textContent = error.message;
+      toast(error.message, true);
+    }
+  }
+}
+function renderUpstreamKeys(data = {}) {
+  const anon = $("#upk-anonymous");
+  if (anon) {
+    const checked = !!data.anonymous;
+    // 用户正在切换时不覆盖控件状态，避免闪烁。
+    if (!anon.dataset.busy) anon.checked = checked;
+  }
+  const rows = $("#upk-rows");
+  rows.replaceChildren();
+  upstreamKeyData.forEach((key) => {
+    const row = document.createElement("tr");
+    const tierCell = document.createElement("td");
+    const tierBadge = document.createElement("span");
+    tierBadge.className = `pill ${key.tier === "go" ? "ok" : ""}`;
+    tierBadge.textContent = key.tier.toUpperCase();
+    tierCell.appendChild(tierBadge);
+    row.appendChild(tierCell);
+    appendCell(row, key.display, "mono");
+    const noteCell = document.createElement("td");
+    if (key.editing) {
+      const input = document.createElement("input");
+      input.value = key.note || "";
+      input.maxLength = 80;
+      input.placeholder = "备注";
+      const save = document.createElement("button");
+      save.className = "ghost";
+      save.textContent = "保存";
+      save.onclick = async () => {
+        try {
+          const data2 = await api(`/api/upstream-keys/${key.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ note: input.value }),
+          });
+          upstreamKeyData = data2.keys || [];
+          renderUpstreamKeys(data2);
+          toast("备注已保存");
+        } catch (error) {
+          toast(error.message, true);
+        }
+      };
+      const cancel = document.createElement("button");
+      cancel.className = "ghost";
+      cancel.textContent = "取消";
+      cancel.onclick = () => {
+        delete key.editing;
+        renderUpstreamKeys({ anonymous: data.anonymous });
+      };
+      const wrap = document.createElement("div");
+      wrap.className = "key-actions";
+      wrap.append(input, save, cancel);
+      noteCell.appendChild(wrap);
+    } else {
+      noteCell.textContent = key.note || "—";
+    }
+    row.appendChild(noteCell);
+    appendCell(row, key.proxy || "—", "mono");
+    const cooldown = key.cooldown_until
+      ? `冷却至 ${new Date(key.cooldown_until).toLocaleTimeString()}`
+      : key.failures
+        ? `失败 ${key.failures} 次`
+        : "正常";
+    appendCell(row, cooldown, key.cooldown_until ? "warn" : key.failures ? "warn" : "ok");
+    appendCell(
+      row,
+      key.created_at ? new Date(key.created_at).toLocaleString() : "—",
+    );
+    const actions = document.createElement("td");
+    actions.className = "key-actions";
+    const editButton = document.createElement("button");
+    editButton.className = "ghost";
+    editButton.textContent = key.editing ? "编辑中" : "✏️ 备注";
+    editButton.disabled = !!key.editing;
+    editButton.onclick = () => {
+      key.editing = true;
+      renderUpstreamKeys({ anonymous: data.anonymous });
+    };
+    actions.appendChild(editButton);
+    const delButton = document.createElement("button");
+    delButton.className = "ghost";
+    delButton.textContent = "删除";
+    delButton.onclick = () => deleteUpstreamKey(key);
+    actions.appendChild(delButton);
+    row.appendChild(actions);
+    rows.appendChild(row);
+  });
+  if (!upstreamKeyData.length)
+    emptyRow(rows, 7, "暂无上游 Key：匿名通道开启时免费模型仍可用，添加 Key 可获得独立配额兜底。");
+}
+async function deleteUpstreamKey(key) {
+  const label = key.note ? `${key.tier.toUpperCase()} · ${key.display}（${key.note}）` : `${key.tier.toUpperCase()} · ${key.display}`;
+  if (!confirm(`删除上游 Key ${label}？\n关闭匿名通道且这是最后一个 Key 时，网关会拒绝保存以保护路由。`)) return;
+  try {
+    const data = await api(`/api/upstream-keys/${key.id}`, { method: "DELETE" });
+    upstreamKeyData = data.keys || [];
+    renderUpstreamKeys(data);
+    await loadDebugModels();
+    refreshMonitor().catch(() => {});
+    toast("上游 Key 已删除并热生效");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+$("#upk-add").onclick = async () => {
+  const value = $("#upk-new-value").value.trim();
+  if (!value) {
+    toast("请填写 Key", true);
+    return;
+  }
+  try {
+    const data = await api("/api/upstream-keys", {
+      method: "POST",
+      body: JSON.stringify({
+        tier: $("#upk-new-tier").value,
+        value,
+        note: $("#upk-new-note").value.trim(),
+      }),
+    });
+    upstreamKeyData = data.keys || [];
+    $("#upk-new-value").value = "";
+    $("#upk-new-note").value = "";
+    renderUpstreamKeys(data);
+    await loadDebugModels();
+    refreshMonitor().catch(() => {});
+    toast("上游 Key 已添加并热生效");
+  } catch (error) {
+    toast(error.message, true);
+  }
+};
+$("#upk-anonymous").onchange = async (event) => {
+  const checkbox = event.target;
+  checkbox.dataset.busy = "1";
+  try {
+    const data = await api("/api/upstream-keys/anonymous", {
+      method: "POST",
+      body: JSON.stringify({ enabled: checkbox.checked }),
+    });
+    upstreamKeyData = data.keys || [];
+    delete checkbox.dataset.busy;
+    renderUpstreamKeys(data);
+    await loadDebugModels();
+    refreshMonitor().catch(() => {});
+    toast(data.anonymous ? "匿名通道已启用" : "匿名通道已关闭");
+  } catch (error) {
+    delete checkbox.dataset.busy;
+    // 回滚控件到服务端真实状态
+    loadUpstreamKeys(true);
+    toast(error.message, true);
+  }
+};
+$("#upk-refresh").onclick = () => loadUpstreamKeys();
+
 function renderResources(resources) {
   const proxies = $("#proxy-table");
   proxies.replaceChildren();
@@ -903,7 +1029,8 @@ function renderPlayKeys() {
       const cooling = item.cooldown_until
         ? ` · 冷却至 ${new Date(item.cooldown_until).toLocaleTimeString()}`
         : "";
-      option.textContent = `${tier.toUpperCase()} · ${item.display} · ${item.id}${cooling}`;
+      const note = item.note ? `「${item.note}」` : "";
+      option.textContent = `${tier.toUpperCase()} · ${item.display}${note} · ${item.id}${cooling}`;
       group.appendChild(option);
     });
     select.appendChild(group);

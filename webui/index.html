@@ -71,6 +71,9 @@
           </button>
           <button data-page="rotation"><span class="nav-no">🔁</span><span>模型轮转</span></button>
           <button data-page="proxies"><span class="nav-no">🌐</span><span>代理管理</span></button>
+          <button data-page="upstream-keys">
+            <span class="nav-no">🔐</span><span>上游 Key 管理</span>
+          </button>
           <button data-page="availability">
             <span class="nav-no">✅</span><span>免费模型可用性</span>
           </button>
@@ -546,40 +549,10 @@
             <div class="section">
               <div class="section-head">
                 <div>
-                  <h2>密钥与匿名通道</h2>
-                  <div class="section-caption">敏感值默认仅显示掩码；移除后保存才会生效。</div>
-                </div>
-                <button id="reveal" type="button" class="ghost">二次验证查看</button>
-              </div>
-              <div class="form-grid">
-                <div class="field full">
-                  <label class="check-label"
-                    ><input id="c-anonymous" type="checkbox" />启用 Zen 匿名通道</label
-                  >
-                </div>
-                <div class="field full">
-                  <label>Server Keys</label>
-                  <div id="server_keys-chips" class="chips"></div>
-                  <textarea id="server_keys-new" placeholder="每行新增一个 key"></textarea>
-                </div>
-                <div class="field">
-                  <label>Zen Keys</label>
-                  <div id="zen_keys-chips" class="chips"></div>
-                  <textarea id="zen_keys-new" placeholder="每行新增一个 key"></textarea>
-                </div>
-                <div class="field">
-                  <label>Go Keys</label>
-                  <div id="go_keys-chips" class="chips"></div>
-                  <textarea id="go_keys-new" placeholder="每行新增一个 key"></textarea>
-                </div>
-              </div>
-            </div>
-            <div class="section">
-              <div class="section-head">
-                <div>
                   <h2>Proxy 文件</h2>
                   <div class="section-caption">
-                    代理节点的增删改查已移至「代理管理」页；此处仅保留 proxyfile 路径。
+                    代理节点的增删改查已移至「代理管理」页；Zen / Go Key 与匿名通道在「上游 Key 管理」页；此处仅保留
+                    proxyfile 路径。
                   </div>
                 </div>
               </div>
@@ -588,8 +561,6 @@
                   <label>Proxy File</label><input id="c-proxyfile" placeholder="proxies.txt" />
                 </div>
               </div>
-              <div id="proxies-chips" class="chips hidden" aria-hidden="true"></div>
-              <textarea id="proxies-new" class="hidden" aria-hidden="true" tabindex="-1"></textarea>
             </div>
             <div class="section">
               <div class="section-head">
@@ -947,6 +918,90 @@
               ></textarea>
             </div>
             <p id="proxy-bulk-status" class="section-caption" role="status"></p>
+          </div>
+        </section>
+        <section id="page-upstream-keys" class="page hidden">
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>🔐 上游 Key 管理</h2>
+                <div class="section-caption">
+                  这是网关调用 OpenCode 上游用的 Zen / Go 凭证，不要发给下游客户端（客户端用的
+                  Key 在「API Key 管理」页签发）。可为每个 Key 设置备注便于区分，增删改即时热生效。
+                </div>
+              </div>
+              <button id="upk-refresh" class="ghost">刷新列表</button>
+            </div>
+            <div class="field full">
+              <label class="check-label"
+                ><input id="upk-anonymous" type="checkbox" />启用 Zen
+                匿名通道（免费模型的公共凭证主道；Zen Key 在其失败后兜底）</label
+              >
+            </div>
+            <p id="upk-error" class="error" role="status"></p>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Tier</th>
+                    <th>Key（掩码）</th>
+                    <th>备注</th>
+                    <th>绑定代理</th>
+                    <th>失败 / 冷却</th>
+                    <th>创建时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="upk-rows"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>添加上游 Key</h2>
+                <div class="section-caption">
+                  同一 Tier 内重复的 Key 会被拒绝；备注可随时在列表里修改。
+                </div>
+              </div>
+            </div>
+            <div class="upk-add">
+              <div class="field">
+                <label>Tier</label
+                ><select id="upk-new-tier">
+                  <option value="zen">Zen</option>
+                  <option value="go">Go</option>
+                </select>
+              </div>
+              <div class="field upk-grow">
+                <label>Key</label
+                ><input
+                  id="upk-new-value"
+                  placeholder="粘贴 Zen / Go Key"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="field upk-grow">
+                <label>备注（可选，最多 80 字）</label
+                ><input id="upk-new-note" maxlength="80" placeholder="例如：主号 / 备用 / 某某渠道" />
+              </div>
+              <div class="field upk-btn">
+                <label>&nbsp;</label><button id="upk-add" class="primary">➕ 添加</button>
+              </div>
+            </div>
+          </div>
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>敏感值查看</h2>
+                <div class="section-caption">
+                  列表中永远只显示掩码；需要核对完整值时二次验证密码后一次性展示（含 Server
+                  Key 与代理）。
+                </div>
+              </div>
+              <button id="reveal" type="button" class="ghost">二次验证查看</button>
+            </div>
           </div>
         </section>
         <section id="page-api-keys" class="page hidden">
