@@ -10,7 +10,17 @@ import (
 
 func resolveProxyFiles(configPath string, cfg *Config) error {
 	trimList(&cfg.Proxies)
-	effective := append([]string(nil), cfg.Proxies...)
+	// Drop disabled entries from the runtime pool while keeping them in
+	// cfg.Proxies so the proxy page can show and re-enable them.
+	active := make([]string, 0, len(cfg.Proxies))
+	for _, value := range cfg.Proxies {
+		if cfg.DisabledProxies[Fingerprint(value)] {
+			continue
+		}
+		active = append(active, value)
+	}
+	effective := append([]string(nil), active...)
+	var fromFile []string
 	if cfg.ProxyFile != "" {
 		resolved := cfg.ProxyFile
 		if !filepath.IsAbs(resolved) {
@@ -20,6 +30,7 @@ func resolveProxyFiles(configPath string, cfg *Config) error {
 		if err != nil {
 			return fmt.Errorf("load proxy file %s: %w", resolved, err)
 		}
+		fromFile = proxies
 		effective = append(effective, proxies...)
 	}
 
@@ -28,6 +39,7 @@ func resolveProxyFiles(configPath string, cfg *Config) error {
 		effective = []string{"direct"}
 	}
 	cfg.effectiveProxies = effective
+	cfg.proxyFileEntries = uniqueStrings(append([]string(nil), fromFile...))
 	return nil
 }
 

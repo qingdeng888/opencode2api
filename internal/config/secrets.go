@@ -22,10 +22,17 @@ func RedactURL(raw string) string {
 	if err != nil {
 		return "<invalid>"
 	}
-	if u.User != nil {
-		u.User = url.User("***")
+	if u.User == nil {
+		return u.String()
 	}
-	return u.String()
+	// Mask the userinfo without url.String's percent-encoding: encoding "***"
+	// as %2A%2A%2A is what produced the garbled proxy addresses in the UI.
+	u.User = nil
+	masked := u.String()
+	if i := strings.Index(masked, "://"); i >= 0 {
+		return masked[:i+3] + "***@" + masked[i+3:]
+	}
+	return "***@" + masked
 }
 
 type SecretRedactor struct {

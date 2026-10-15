@@ -14,6 +14,7 @@ let csrf = "",
 const pages = {
   availability: ["13", "免费模型可用性", "每小时探测，手动控制的模型不受影响。"],
   rotation: ["12", "模型轮转", "共享当前模型、故障切换与尝试记录。"],
+  proxies: ["14", "代理管理", "出站代理池的新增、删除与逐个连通性测试。"],
   overview: ["01", "运行桌面", "最近一小时、进程累计与当前资源状态。"],
   guide: ["02", "首次运行", "用六个检查点完成从配置到首个请求。"],
   access: ["03", "接入手册", "Chat、Responses、Anthropic 与 SDK 示例。"],
@@ -65,10 +66,9 @@ async function enterConsole(session) {
   $("#login").classList.add("hidden");
   $("#app").classList.remove("hidden");
   await loadConfig();
-  await Promise.all([refreshMonitor(), loadDebugModels()]);
+  await Promise.all([refreshMonitor(), loadDebugModels(), loadProxies(true)]);
   clearInterval(monitorTimer);
-  monitorTimer = setInterval(refreshMonitor, 3000);
-  connectLogs();
+  monitorTimer = setInterval(refreshMonitor, 3000);  connectLogs();
   openPage(pages[location.hash.slice(1)] ? location.hash.slice(1) : "overview");
 }
 async function boot() {
@@ -121,6 +121,7 @@ function openPage(page) {
     }, 60000);
   }
   if (page === "rotation") loadRotation();
+  if (page === "proxies") loadProxies();
   if (page === "availability") loadAvailability();
   if (page === "api-keys") loadAPIKeys();
   if (page === "playground" && !debugData) loadDebugModels();
@@ -173,6 +174,7 @@ function fillConfig(value) {
 }
 function renderChips(name) {
   const host = $(`#${name}-chips`);
+  if (!host) return;
   host.replaceChildren();
   (config[name] || []).forEach((item) => {
     const chip = document.createElement("span"),
@@ -190,12 +192,18 @@ function renderChips(name) {
   });
 }
 function secretInputs(name) {
-  const kept = [...$(`#${name}-chips`).children].map((node) => ({ id: node.dataset.id }));
-  const added = $(`#${name}-new`)
-    .value.split(/\r?\n/)
-    .map((value) => value.trim())
-    .filter(Boolean)
-    .map((value) => ({ value }));
+  const host = $(`#${name}-chips`);
+  const kept = host
+    ? [...host.children].map((node) => ({ id: node.dataset.id }))
+    : (config[name] || []).map((item) => ({ id: item.id }));
+  const addedEl = $(`#${name}-new`);
+  const added = addedEl
+    ? addedEl.value
+        .split(/\r?\n/)
+        .map((value) => value.trim())
+        .filter(Boolean)
+        .map((value) => ({ value }))
+    : [];
   return kept.concat(added);
 }
 const number = (id) => Number($(id).value);
@@ -246,11 +254,13 @@ $("#config-form").addEventListener("submit", async (event) => {
     };
     const result = await api("/api/config", { method: "PUT", body: JSON.stringify(update) });
     config = result.config;
-    ["server_keys", "zen_keys", "go_keys", "proxies"].forEach(
-      (name) => ($(`#${name}-new`).value = ""),
-    );
+    ["server_keys", "zen_keys", "go_keys", "proxies"].forEach((name) => {
+      const el = $(`#${name}-new`);
+      if (el) el.value = "";
+    });
     fillConfig(config);
     await loadDebugModels();
+    await loadProxies(true);
     toast(
       result.result.restart_required
         ? `已应用；${result.result.restart_fields.join(", ")} 需重启`
@@ -265,6 +275,7 @@ $("#reload-config").onclick = async () => {
     const result = await api("/api/config/reload", { method: "POST", body: "{}" });
     await loadConfig();
     await loadDebugModels();
+    await loadProxies(true);
     toast(result.restart_required ? "磁盘配置已重载，监听字段需重启" : "磁盘配置已重载");
   } catch (error) {
     toast(error.message, true);
@@ -320,6 +331,370 @@ function emptyRow(host, columns, message = "暂无数据") {
   row.appendChild(cell);
   host.appendChild(row);
 }
+/* ===== 代理管理（独立页）：列表 / 添加 / 批量 / 逐个连通性测试 ===== */
+let proxyData = [],
+  proxyTestResults = {},
+  proxyTestRunning = {},
+  proxyMeta = {},
+  proxyBatchRunning = false;
+const proxySourceLabel = { config: "配置", proxyfile: "文件", default: "默认" };
+async function loadProxies(silent = false) {
+  try {
+    const data = await api("/api/proxies");
+    proxyData = data.proxies || [];
+    proxyMeta = data;
+    renderProxies(data);
+    if (!silent) $("#proxy-error").textContent = "";
+  } catch (error) {
+    if (!silent) {
+      $("#proxy-error").textContent = error.message;
+      toast(error.message, true);
+    }
+  }
+}
+
+function renderProxies(data = {}) {
+  const cards = $("#proxy-cards");
+  cards.replaceChildren();
+  const healthy = proxyData.filter((proxy) => proxy.healthy).length;
+  [
+    ["代理总数", proxyData.length, ""],
+    ["健康", healthy, "green"],
+    ["不可用", proxyData.length - healthy, proxyData.length - healthy ? "red" : "green"],
+    ["匿名通道", data.anonymous ? "开" : "关", data.anonymous ? "green" : ""],
+  ].forEach(([label, value, tone]) => {
+    const stat = document.createElement("div");
+    stat.className = "conn-stat";
+    const num = document.createElement("div");
+    num.className = `num ${tone}`;
+    num.textContent = value;
+    const name = document.createElement("div");
+    name.className = "label";
+    name.textContent = label;
+    stat.append(num, name);
+    cards.appendChild(stat);
+  });
+  const hint = document.createElement("div");
+  hint.className = "section-caption";
+  hint.textContent = data.proxyfile
+    ? `另有 proxyfile（${data.proxyfile}）条目参与路由，不可在此页删除。`
+    : "全部代理均来自本页配置，可直接管理。";
+  cards.appendChild(hint);
+  const rows = $("#proxy-rows");
+  rows.replaceChildren();
+  proxyData.forEach((proxy) => {
+    const row = document.createElement("tr");
+    const checkCell = document.createElement("td");
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "proxy-check";
+    check.dataset.pid = proxy.id;
+    check.checked = !!proxyTestResults[proxy.id]?.selected;
+    check.onchange = () => {
+      proxyTestResults[proxy.id] = { ...(proxyTestResults[proxy.id] || {}), selected: check.checked };
+      updateProxyBulkCount();
+    };
+    checkCell.appendChild(check);
+    row.appendChild(checkCell);
+    appendCell(row, proxy.address);
+    appendCell(row, proxySourceLabel[proxy.source] || proxy.source);
+    if (proxy.enabled === false) {
+      appendCell(row, "已停用", "status warn");
+    } else {
+      appendCell(row, proxy.healthy ? "正常" : "不可用", `status ${proxy.healthy ? "ok" : "bad"}`);
+    }
+    appendCell(row, proxy.enabled === false ? "—" : `Z ${proxy.zen_keys} · G ${proxy.go_keys}`);
+    appendCell(row, proxy.enabled === false ? "—" : proxy.anonymous ? "轮询" : "—");
+    const testCell = document.createElement("td");
+    const last = proxyTestResults[proxy.id]?.last;
+    if (proxyTestRunning[proxy.id]) {
+      testCell.innerHTML = '<span class="loading"></span> 测试中…';
+    } else if (last) {
+      testCell.className = last.ok ? "proxy-test-ok" : "proxy-test-fail";
+      testCell.textContent = last.ok
+        ? `✅ HTTP ${last.status} · ${last.latency_ms}ms`
+        : `❌ ${last.error || "失败"} · ${last.latency_ms}ms`;
+    } else {
+      testCell.textContent = "未测试";
+    }
+    row.appendChild(testCell);
+    const actions = document.createElement("td");
+    actions.className = "key-actions";
+    const testButton = document.createElement("button");
+    testButton.className = "ghost";
+    testButton.textContent = "⚡ 测试";
+    testButton.disabled = !!proxyTestRunning[proxy.id] || proxyBatchRunning || proxy.enabled === false;
+    testButton.title = proxy.enabled === false ? "已停用的代理不参与路由，无需测试" : "";
+    testButton.onclick = () => testProxy(proxy.id);
+    actions.appendChild(testButton);
+    if (proxy.managed) {
+      const toggleButton = document.createElement("button");
+      toggleButton.className = "ghost";
+      toggleButton.textContent = proxy.enabled === false ? "启用" : "停用";
+      toggleButton.disabled = proxyBatchRunning;
+      toggleButton.onclick = () => setProxiesEnabled([proxy.id], proxy.enabled === false);
+      actions.appendChild(toggleButton);
+      const delButton = document.createElement("button");
+      delButton.className = "ghost";
+      delButton.textContent = "删除";
+      delButton.onclick = () => deleteProxy(proxy);
+      actions.appendChild(delButton);
+    }
+    row.appendChild(actions);
+    rows.appendChild(row);
+  });
+  if (!proxyData.length) emptyRow(rows, 8, "暂无代理");
+  updateProxyBulkCount();
+}
+function proxySelectedIds() {
+  return proxyData.filter((proxy) => proxyTestResults[proxy.id]?.selected).map((proxy) => proxy.id);
+}
+function setAllProxySelected(selected) {
+  proxyData.forEach((proxy) => {
+    proxyTestResults[proxy.id] = { ...(proxyTestResults[proxy.id] || {}), selected };
+  });
+  renderProxies(proxyMeta);
+}
+function updateProxyBulkCount() {
+  const count = proxySelectedIds().length;
+  const bar = $("#proxy-bulk-bar");
+  if (bar) bar.textContent = count ? `已选 ${count} / 共 ${proxyData.length} 个` : "";
+  const all = $("#proxy-select-all");
+  if (all) {
+    all.checked = proxyData.length > 0 && count === proxyData.length;
+    all.indeterminate = count > 0 && count < proxyData.length;
+  }
+  const testBtn = $("#proxy-test-selected");
+  if (testBtn) testBtn.disabled = proxyBatchRunning || count === 0;
+  const delBtn = $("#proxy-delete-selected");
+  if (delBtn) delBtn.disabled = proxyBatchRunning || count === 0;
+  const enableBtn = $("#proxy-enable-selected");
+  if (enableBtn) enableBtn.disabled = proxyBatchRunning || count === 0;
+  const disableBtn = $("#proxy-disable-selected");
+  if (disableBtn) disableBtn.disabled = proxyBatchRunning || count === 0;
+}
+async function setProxiesEnabled(ids, enabled, silent = false) {
+  if (!ids.length) {
+    if (!silent) toast("请先勾选代理", true);
+    return 0;
+  }
+  if (proxyBatchRunning) return 0;
+  proxyBatchRunning = true;
+  updateProxyBulkCount();
+  try {
+    const data = await api("/api/proxies/enabled", {
+      method: "POST",
+      body: JSON.stringify({ ids, enabled }),
+    });
+    proxyData = data.proxies || [];
+    proxyMeta = data;
+    renderProxies(data);
+    const skipped = (data.skipped || []).length ? `，跳过 ${data.skipped.length} 个非配置来源` : "";
+    if (!silent) toast(`已${enabled ? "启用" : "停用"} ${(data.changed || []).length} 个代理${skipped}`);
+    // Refresh the overview counters in the background without blocking the
+    // buttons: awaiting it here kept proxyBatchRunning true if /api/monitor
+    // was slow, which froze every row button until a page refresh.
+    refreshMonitor().catch(() => {});
+    return (data.changed || []).length;
+  } catch (error) {
+    if (!silent) toast(error.message, true);
+    return 0;
+  } finally {
+    proxyBatchRunning = false;
+    // Rows were rendered while the flag was still true, so every row button
+    // came out disabled; re-render now that the flag is cleared. Without this
+    // the table stayed frozen until a full page refresh.
+    renderProxies(proxyMeta);
+  }
+}
+async function testProxy(id, quiet = false) {
+  proxyTestRunning[id] = true;
+  renderProxies(proxyMeta);
+  try {
+    const result = await api(`/api/proxies/${id}/test`, { method: "POST", body: "{}" });
+    proxyTestResults[id] = {
+      ...(proxyTestResults[id] || {}),
+      last: {
+        ok: !!result.ok,
+        status: result.status,
+        latency_ms: result.latency_ms,
+        error: result.error,
+      },
+    };
+    if (!quiet) {
+      toast(
+        result.ok
+          ? `代理连通正常 · HTTP ${result.status} · ${result.latency_ms}ms`
+          : `代理测试失败：${result.error || "未知错误"}`,
+        !result.ok,
+      );
+    }
+    return !!result.ok;
+  } catch (error) {
+    proxyTestResults[id] = { ...(proxyTestResults[id] || {}), last: { ok: false, error: error.message } };
+    if (!quiet) toast(error.message, true);
+    return false;
+  } finally {
+    delete proxyTestRunning[id];
+    renderProxies(proxyMeta);
+  }
+}
+async function testSelectedProxies() {
+  const ids = proxySelectedIds();
+  if (!ids.length) {
+    toast("请先勾选要测试的代理", true);
+    return;
+  }
+  if (proxyBatchRunning) return;
+  proxyBatchRunning = true;
+  updateProxyBulkCount();
+  const progress = $("#proxy-test-progress");
+  let okCount = 0,
+    limited = false;
+  for (let i = 0; i < ids.length; i++) {
+    if (progress) progress.textContent = `测试中 ${i + 1}/${ids.length}…`;
+    try {
+      const result = await api(`/api/proxies/${ids[i]}/test`, { method: "POST", body: "{}" });
+      proxyTestResults[ids[i]] = {
+        ...(proxyTestResults[ids[i]] || {}),
+        last: {
+          ok: !!result.ok,
+          status: result.status,
+          latency_ms: result.latency_ms,
+          error: result.error,
+        },
+      };
+      if (result.ok) okCount++;
+    } catch (error) {
+      proxyTestResults[ids[i]] = {
+        ...(proxyTestResults[ids[i]] || {}),
+        last: { ok: false, error: error.message },
+      };
+      if (/429|too many|限流|rate_limited/i.test(error.message)) {
+        limited = true;
+        break;
+      }
+    } finally {
+      renderProxies(proxyMeta);
+    }
+  }
+  proxyBatchRunning = false;
+  if (progress) progress.textContent = "";
+  // Re-render after clearing the flag: rows drawn inside the loop had their
+  // buttons disabled while the batch was running.
+  renderProxies(proxyMeta);
+  if (limited) {
+    toast(`触发测试限流（每分钟 12 次），已测 ${okCount} 个连通，稍后可继续测剩余代理`, true);
+  } else {
+    toast(`选中代理测试完成：${okCount}/${ids.length} 个连通`, okCount !== ids.length);
+  }
+}
+$("#proxy-test-selected").onclick = testSelectedProxies;
+$("#proxy-enable-selected").onclick = () => setProxiesEnabled(proxySelectedIds(), true);
+$("#proxy-disable-selected").onclick = () => setProxiesEnabled(proxySelectedIds(), false);
+async function deleteSelectedProxies() {
+  const ids = proxySelectedIds();
+  if (!ids.length) {
+    toast("请先勾选要删除的代理", true);
+    return;
+  }
+  if (proxyBatchRunning) return;
+  const managed = proxyData.filter((proxy) => ids.includes(proxy.id) && proxy.managed);
+  const unmanaged = ids.length - managed.length;
+  const preview = managed
+    .slice(0, 5)
+    .map((proxy) => proxy.address)
+    .join("\n");
+  const extra = managed.length > 5 ? `\n…等共 ${managed.length} 个` : "";
+  const note = unmanaged ? `\n（另有 ${unmanaged} 个非配置来源代理不可删除，将自动跳过）` : "";
+  if (!managed.length) {
+    toast("选中的代理都不是配置来源，不可删除", true);
+    return;
+  }
+  if (!confirm(`删除选中的 ${managed.length} 个代理？\n${preview}${extra}${note}\nKey 绑定会自动热迁移到其它健康节点。`))
+    return;
+  proxyBatchRunning = true;
+  updateProxyBulkCount();
+  try {
+    const data = await api("/api/proxies/delete", { method: "POST", body: JSON.stringify({ ids }) });
+    proxyData = data.proxies || [];
+    proxyMeta = data;
+    managed.forEach((proxy) => {
+      delete proxyTestResults[proxy.id];
+    });
+    const skipped = (data.skipped || []).length ? `，跳过 ${data.skipped.length} 个非配置来源` : "";
+    toast(`已删除 ${(data.removed || []).length} 个代理${skipped}，路由已热迁移`);
+    refreshMonitor().catch(() => {});
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    proxyBatchRunning = false;
+    // Same as setProxiesEnabled: re-render so row buttons re-enable.
+    renderProxies(proxyMeta);
+  }
+}
+$("#proxy-delete-selected").onclick = deleteSelectedProxies;
+$("#proxy-select-all-btn").onclick = () => setAllProxySelected(true);
+$("#proxy-deselect-btn").onclick = () => setAllProxySelected(false);
+$("#proxy-select-all").onchange = (event) => setAllProxySelected(event.target.checked);
+async function deleteProxy(proxy) {
+  if (!confirm(`删除代理 ${proxy.address}？Key 绑定会自动热迁移到其它健康节点。`)) return;
+  try {
+    const data = await api(`/api/proxies/${proxy.id}`, { method: "DELETE" });
+    proxyData = data.proxies || [];
+    proxyMeta = data;
+    delete proxyTestResults[proxy.id];
+    renderProxies(data);
+    await refreshMonitor();
+    toast("代理已删除，路由已热迁移");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+$("#proxy-add").onclick = async () => {
+  const value = $("#proxy-new-value").value.trim();
+  if (!value) {
+    toast("请填写代理地址", true);
+    return;
+  }
+  try {
+    const data = await api("/api/proxies", { method: "POST", body: JSON.stringify({ value }) });
+    proxyData = data.proxies || [];
+    proxyMeta = data;
+    $("#proxy-new-value").value = "";
+    renderProxies(data);
+    await refreshMonitor();
+    toast("代理已添加并生效");
+  } catch (error) {
+    toast(error.message, true);
+  }
+};
+$("#proxy-bulk-run").onclick = async () => {
+  const text = $("#proxy-bulk-text").value;
+  if (!text.trim()) {
+    toast("请先粘贴代理列表", true);
+    return;
+  }
+  $("#proxy-bulk-status").textContent = "导入中…";
+  try {
+    const data = await api("/api/proxies/bulk", { method: "POST", body: JSON.stringify({ text }) });
+    proxyData = data.proxies || [];
+    proxyMeta = data;
+    $("#proxy-bulk-text").value = "";
+    const skipped = (data.skipped || []).length
+      ? `，跳过已存在 ${data.skipped.length} 个`
+      : "";
+    $("#proxy-bulk-status").textContent = `成功导入 ${data.added} 个${skipped}。`;
+    renderProxies(data);
+    await refreshMonitor();
+    toast(`批量导入完成：新增 ${data.added} 个${skipped}`);
+  } catch (error) {
+    $("#proxy-bulk-status").textContent = error.message;
+    toast(error.message, true);
+  }
+};
+$("#proxy-refresh").onclick = () => loadProxies();
+
 function renderResources(resources) {
   const proxies = $("#proxy-table");
   proxies.replaceChildren();
@@ -553,14 +928,133 @@ async function loadDebugModels() {
     if (selected && [...select.options].some((option) => option.value === selected))
       select.value = selected;
     renderPlayKeys();
+    syncConnModels();
     if (!$("#play-request").value.trim()) resetPlayTemplate();
     renderDiagnostics();
   } catch (error) {
     toast(error.message, true);
   }
 }
-function playgroundTemplate() {
-  const protocol = $("#play-protocol").value,
+/* ===== API 连通性测试（一键真实路由：自动路由 + chat 协议 + 非流式） ===== */
+function syncConnModels() {
+  const select = $("#conn-model");
+  if (!select || !debugData) return;
+  const selected = select.value;
+  select.replaceChildren();
+  (debugData.models || []).forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.model;
+    option.textContent = item.model;
+    select.appendChild(option);
+  });
+  if (selected && [...select.options].some((option) => option.value === selected))
+    select.value = selected;
+}
+function extractConnText(response) {
+  if (!response || typeof response !== "object") return "";
+  const choices = response.choices;
+  if (Array.isArray(choices) && choices[0]?.message?.content) {
+    const content = choices[0].message.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content))
+      return content
+        .map((part) => (typeof part === "string" ? part : part?.text || ""))
+        .join("");
+  }
+  if (typeof response.output_text === "string") return response.output_text;
+  if (Array.isArray(response.output)) {
+    const texts = [];
+    for (const item of response.output)
+      for (const part of item?.content || [])
+        if (typeof part?.text === "string") texts.push(part.text);
+    if (texts.length) return texts.join("");
+  }
+  if (Array.isArray(response.content))
+    return response.content.map((part) => part?.text || "").join("");
+  return "";
+}
+$("#conn-run").onclick = async () => {
+  const model = $("#conn-model").value;
+  const message = $("#conn-msg").value.trim();
+  if (!model) {
+    toast("暂无可用模型", true);
+    return;
+  }
+  if (!message) {
+    toast("请填写测试消息", true);
+    return;
+  }
+  const button = $("#conn-run"),
+    out = $("#conn-result");
+  const started = Date.now();
+  button.disabled = true;
+  button.innerHTML = '<span class="loading"></span>测试中…';
+  out.innerHTML = "";
+  const hint = document.createElement("div");
+  hint.className = "conn-hint";
+  hint.innerHTML = '⏳ 发送中… <span id="conn-timer">0</span>s';
+  out.appendChild(hint);
+  const timer = setInterval(() => {
+    const el = $("#conn-timer");
+    if (el) el.textContent = Math.floor((Date.now() - started) / 1000);
+  }, 500);
+  const fmtMs = (ms) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`);
+  try {
+    const result = await api("/api/debug/inference", {
+      method: "POST",
+      body: JSON.stringify({
+        protocol: "chat",
+        key: { mode: "auto" },
+        request: { model, messages: [{ role: "user", content: message }] },
+      }),
+    });
+    clearInterval(timer);
+    const route = result.route || {};
+    const routeLabel = route.tier
+      ? `${route.tier} / ${route.anonymous ? "anonymous" : route.key_id || "key"}`
+      : "未路由";
+    const text = extractConnText(result.response);
+    const preview = text.length > 200 ? `${text.slice(0, 200)}…` : text || "(空响应)";
+    const box = document.createElement("div");
+    box.className = `conn-box ${result.ok ? "conn-ok" : "conn-fail"}`;
+    const latency = fmtMs(Math.max(result.duration_ms ?? Date.now() - started, 0));
+    const head = document.createElement("div");
+    head.innerHTML = result.ok ? "✅ <b>链路正常</b>" : "❌ <b>链路异常</b>";
+    const cost = document.createElement("b");
+    cost.style.color = result.ok ? "var(--accent2)" : "var(--danger)";
+    cost.textContent = ` · 耗时 ${latency}`;
+    head.append(" ", cost);
+    if (!result.ok) {
+      const status = document.createElement("span");
+      status.textContent = ` · HTTP ${result.http_status}`;
+      head.appendChild(status);
+    }
+    const meta = document.createElement("div");
+    meta.className = "conn-meta";
+    const line1 = document.createElement("div");
+    line1.textContent = `🛣️ 路由: ${routeLabel} · 模型: ${model}`;
+    const reply = document.createElement("div");
+    reply.className = "conn-reply";
+    reply.textContent = `📝 回复: ${preview}`;
+    meta.append(line1, reply);
+    box.append(head, meta);
+    out.replaceChildren(box);
+    toast(result.ok ? "API 链路正常" : `测试失败：HTTP ${result.http_status}`, !result.ok);
+  } catch (error) {
+    clearInterval(timer);
+    out.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "conn-box conn-fail";
+    box.textContent = `❌ 测试失败：${error.message}`;
+    out.appendChild(box);
+    toast(`测试失败：${error.message}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "🚀 发送测试请求";
+  }
+};
+
+function playgroundTemplate() {  const protocol = $("#play-protocol").value,
     model = $("#play-model").value || "YOUR_MODEL";
   if (protocol === "responses") return { model, input: "用一句话说明这个模型的能力。" };
   if (protocol === "anthropic")
@@ -796,6 +1290,7 @@ $("#refresh-now").onclick = async () => {
   await Promise.all([refreshMonitor(), loadConfig(), loadDebugModels()]);
   if (location.hash === "#model-quotas") await loadModelQuotas();
   if (location.hash === "#api-keys") await loadAPIKeys();
+  if (location.hash === "#proxies") await loadProxies();
   toast("状态已刷新");
 };
 function derivedAPIBase() {
@@ -1196,11 +1691,24 @@ const rotationReasons = {
   request_conversion_error: "请求转换失败",
   upstream_error: "上游错误",
 };
+// Go 把空切片序列化成 JSON null（sweet 组 order 为空时就是 null），
+// 统一归一化成数组，否则 renderRotation 里 forEach 直接抛
+// "Cannot read properties of null"。
+function normalizeRotation(value) {
+  for (const group of value?.groups || []) {
+    group.order = group.order || [];
+    group.switches = group.switches || [];
+    group.paused = group.paused || {};
+    group.available = group.available || {};
+  }
+  if (value) value.attempts = value.attempts || [];
+  return value;
+}
 async function loadRotation() {
   try {
     const value = await api("/api/rotation");
     if (!csrf) return;
-    rotationData = value;
+    rotationData = normalizeRotation(value);
     rotationDirty = false;
     renderRotation();
   } catch (error) {
@@ -1307,8 +1815,8 @@ function renderRotation() {
             const live = result.groups.find((x) => x.id === item.id);
             Object.assign(item, {
               current: live.current,
-              paused: live.paused,
-              switches: live.switches,
+              paused: live.paused || {},
+              switches: live.switches || [],
             });
           }
           state.persistence_error = result.persistence_error;
@@ -1381,7 +1889,7 @@ $("#rotation-form").onsubmit = async (event) => {
     const body = { first_output_seconds: Number($("#rotation-timeout").value) };
     for (const group of rotationData.groups)
       body[group.id] = { alias: group.alias.trim(), order: group.order };
-    rotationData = await api("/api/rotation", { method: "PUT", body: JSON.stringify(body) });
+    rotationData = normalizeRotation(await api("/api/rotation", { method: "PUT", body: JSON.stringify(body) }));
     rotationDirty = false;
     renderRotation();
     toast("模型轮转配置已保存并生效");
@@ -1392,6 +1900,27 @@ $("#rotation-form").onsubmit = async (event) => {
   }
 };
 boot();
+
+// 主题切换：默认深色（与 Cline-proxy 一致），偏好记入 localStorage。
+try {
+  if (localStorage.getItem("o2a-theme") === "light")
+    document.documentElement.setAttribute("data-theme", "light");
+} catch (_) {}
+function syncThemeIcon() {
+  const light = document.documentElement.getAttribute("data-theme") === "light";
+  const icon = $("#theme-icon");
+  if (icon) icon.textContent = light ? "☀️" : "🌙";
+}
+syncThemeIcon();
+$("#theme-toggle").onclick = () => {
+  const light = document.documentElement.getAttribute("data-theme") === "light";
+  if (light) document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", "light");
+  try {
+    localStorage.setItem("o2a-theme", light ? "dark" : "light");
+  } catch (_) {}
+  syncThemeIcon();
+};
 
 async function loadAvailability() {
   try {

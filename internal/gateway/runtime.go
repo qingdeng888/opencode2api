@@ -306,6 +306,7 @@ type KeyStatus struct {
 }
 
 type ProxyStatus struct {
+	ID        string `json:"id"`
 	Index     int    `json:"index"`
 	Address   string `json:"address"`
 	Healthy   bool   `json:"healthy"`
@@ -313,6 +314,9 @@ type ProxyStatus struct {
 	ZenKeys   int    `json:"zen_keys"`
 	GoKeys    int    `json:"go_keys"`
 	Anonymous bool   `json:"anonymous"`
+	// Source is "config" (config.json proxies), "proxyfile" (proxyfile
+	// entries), or "default" (implicit direct fallback).
+	Source string `json:"source"`
 }
 
 func (m *RuntimeManager) Resources() ResourceSnapshot {
@@ -333,7 +337,11 @@ func (m *RuntimeManager) Resources() ResourceSnapshot {
 	goBindings := append([]int(nil), gateway.goNodes.bindingCount...)
 	gateway.goNodes.bindingsMu.Unlock()
 	for _, proxy := range gateway.transports.items {
-		status := ProxyStatus{Index: proxy.index, Address: config.RedactURL(proxy.name), Healthy: proxy.healthy.Load(), Checking: proxy.checking.Load(), Anonymous: gateway.cfg.Anonymous}
+		// Address carries the raw proxy URL (credentials included). The admin
+		// plane is password-protected, so per operator request the proxy
+		// management page shows full addresses without masking. Logging
+		// call sites must still pass this through config.RedactURL.
+		status := ProxyStatus{ID: config.Fingerprint(proxy.name), Index: proxy.index, Address: proxy.name, Healthy: proxy.healthy.Load(), Checking: proxy.checking.Load(), Anonymous: gateway.cfg.Anonymous, Source: gateway.cfg.ProxySource(proxy.name)}
 		if proxy.index < len(zenBindings) {
 			status.ZenKeys = zenBindings[proxy.index]
 		}
@@ -358,6 +366,21 @@ func (m *RuntimeManager) DebugModels() ([]modelcatalog.RouteDiagnostic, modelcat
 	}
 	metadata := gateway.catalog.MetadataSnapshot()
 	return result, metadata
+}
+
+// ProxyClient exposes one runtime proxy's dialer so the admin plane can probe
+// a single proxy without touching pool health, cooldowns, or key bindings.
+func (m *RuntimeManager) ProxyClient(proxyID string) *http.Client {
+	runtime := m.current.Load()
+	if runtime == nil || runtime.gateway == nil {
+		return nil
+	}
+	for _, proxy := range runtime.gateway.transports.items {
+		if proxy != nil && config.Fingerprint(proxy.name) == proxyID {
+			return proxy.client
+		}
+	}
+	return nil
 }
 
 func (m *RuntimeManager) DebugRoute(model string, requested protocol.Protocol) modelcatalog.RouteDiagnostic {

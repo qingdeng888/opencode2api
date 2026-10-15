@@ -3,24 +3,24 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>opencode2api · Field Manual</title>
+    <title>opencode2api · 控制面板</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <section id="login" class="login">
       <div class="login-intro">
-        <div class="manual-mark"><i>O2</i> OPENCODE GATEWAY</div>
+        <div class="manual-mark"><i>⚡</i> OPENCODE2API</div>
         <div>
-          <div class="eyebrow">Operator field manual / 2026</div>
-          <h1>把协议、路由与运行状态放在一张桌面上。</h1>
-          <p>一个无外部前端依赖的本地控制面。配置、检查、接入，然后让 Gateway 保持可解释。</p>
+          <div class="eyebrow">Gateway console / 2026</div>
+          <h1>把协议、路由与运行状态放在<span class="grad">一张桌面</span>上。</h1>
+          <p>无外部前端依赖的本地控制面。配置、检查、接入，然后让 Gateway 保持可解释。</p>
         </div>
         <div class="mono">CHAT · RESPONSES · ANTHROPIC</div>
       </div>
       <div class="login-panel">
         <form id="login-form" class="login-card">
           <div class="eyebrow">Restricted console</div>
-          <h2>管理登录</h2>
+          <h2>⚡ 管理登录</h2>
           <div class="rule"></div>
           <div class="field">
             <label>账号</label><input id="login-user" autocomplete="username" required />
@@ -30,7 +30,7 @@
             ><input id="login-pass" type="password" autocomplete="current-password" required />
           </div>
           <div id="login-error" class="error"></div>
-          <button class="primary wide">进入 Field Manual</button>
+          <button class="primary wide">进 入 控 制 台</button>
         </form>
       </div>
     </section>
@@ -39,35 +39,40 @@
         <div class="sidebar-head">
           <div>
             <div class="sidebar-kicker">Operator console</div>
-            <div class="sidebar-title">Field Manual</div>
+            <div class="sidebar-title">opencode2api</div>
           </div>
-          <div class="manual-mark"><i>O2</i></div>
+          <div class="manual-mark"><i>⚡</i></div>
+          <button class="theme-toggle" id="theme-toggle" title="切换主题">
+            <span id="theme-icon">🌙</span><span class="light-label">浅色</span
+            ><span class="dark-label">深色</span>
+          </button>
         </div>
         <nav class="nav">
           <button data-page="overview" class="active">
-            <span class="nav-no">01</span><span>运行桌面</span>
+            <span class="nav-no">📊</span><span>运行桌面</span>
           </button>
-          <button data-page="guide"><span class="nav-no">02</span><span>首次运行</span></button>
-          <button data-page="access"><span class="nav-no">03</span><span>接入手册</span></button>
-          <button data-page="usage"><span class="nav-no">04</span><span>Token 用量</span></button>
+          <button data-page="guide"><span class="nav-no">🚀</span><span>首次运行</span></button>
+          <button data-page="access"><span class="nav-no">🔌</span><span>接入手册</span></button>
+          <button data-page="usage"><span class="nav-no">📈</span><span>Token 用量</span></button>
           <button data-page="playground">
-            <span class="nav-no">05</span><span>Playground</span>
+            <span class="nav-no">🧪</span><span>Playground</span>
           </button>
           <button data-page="diagnostics">
-            <span class="nav-no">06</span><span>路由诊断</span>
+            <span class="nav-no">🗺️</span><span>路由诊断</span>
           </button>
-          <button data-page="config"><span class="nav-no">07</span><span>配置中心</span></button>
-          <button data-page="logs"><span class="nav-no">08</span><span>事件日志</span></button>
-          <button data-page="account"><span class="nav-no">09</span><span>账号安全</span></button>
+          <button data-page="config"><span class="nav-no">⚙️</span><span>配置中心</span></button>
+          <button data-page="logs"><span class="nav-no">📜</span><span>事件日志</span></button>
+          <button data-page="account"><span class="nav-no">👤</span><span>账号安全</span></button>
           <button data-page="model-quotas">
-            <span class="nav-no">10</span><span>模型与额度</span>
+            <span class="nav-no">💳</span><span>模型与额度</span>
           </button>
           <button data-page="api-keys">
-            <span class="nav-no">11</span><span>API Key 管理</span>
+            <span class="nav-no">🔑</span><span>API Key 管理</span>
           </button>
-          <button data-page="rotation"><span class="nav-no">12</span><span>模型轮转</span></button>
+          <button data-page="rotation"><span class="nav-no">🔁</span><span>模型轮转</span></button>
+          <button data-page="proxies"><span class="nav-no">🌐</span><span>代理管理</span></button>
           <button data-page="availability">
-            <span class="nav-no">13</span><span>免费模型可用性</span>
+            <span class="nav-no">✅</span><span>免费模型可用性</span>
           </button>
         </nav>
         <div class="sidebar-foot">
@@ -185,6 +190,35 @@
                 </table>
               </div>
             </div>
+          </div>
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>🧪 API 连通性测试</h2>
+                <div class="section-caption">
+                  向本网关发起一次真实的上游请求，验证整个链路（本地 Key → 网关路由 →
+                  上游）是否正常响应。
+                </div>
+              </div>
+            </div>
+            <div class="conn-row">
+              <div class="field">
+                <label>测试模型</label><select id="conn-model"></select>
+              </div>
+              <div class="field conn-msg">
+                <label>测试消息</label
+                ><input
+                  id="conn-msg"
+                  value="你是谁，出来干活了"
+                  placeholder="输入要发送的测试消息"
+                />
+              </div>
+              <div class="field conn-btn">
+                <label>&nbsp;</label
+                ><button id="conn-run" class="primary">🚀 发送测试请求</button>
+              </div>
+            </div>
+            <div id="conn-result" class="conn-result"></div>
           </div>
           <div class="section">
             <div class="section-head">
@@ -543,23 +577,19 @@
             <div class="section">
               <div class="section-head">
                 <div>
-                  <h2>Proxy 节点</h2>
-                  <div class="section-caption">支持 direct、HTTP(S) 与 SOCKS URL。</div>
+                  <h2>Proxy 文件</h2>
+                  <div class="section-caption">
+                    代理节点的增删改查已移至「代理管理」页；此处仅保留 proxyfile 路径。
+                  </div>
                 </div>
               </div>
-              <div id="proxies-chips" class="chips"></div>
               <div class="form-grid">
-                <div class="field">
-                  <label>新增 Proxy（每行一个）</label
-                  ><textarea
-                    id="proxies-new"
-                    placeholder="direct&#10;http://user:pass@host:port"
-                  ></textarea>
-                </div>
-                <div class="field">
+                <div class="field full">
                   <label>Proxy File</label><input id="c-proxyfile" placeholder="proxies.txt" />
                 </div>
               </div>
+              <div id="proxies-chips" class="chips hidden" aria-hidden="true"></div>
+              <textarea id="proxies-new" class="hidden" aria-hidden="true" tabindex="-1"></textarea>
             </div>
             <div class="section">
               <div class="section-head">
@@ -822,6 +852,101 @@
                 <tbody id="rotation-attempts"></tbody>
               </table>
             </div>
+          </div>
+        </section>
+        <section id="page-proxies" class="page hidden">
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>🌐 代理管理</h2>
+                <div class="section-caption">
+                  出站代理池：Key 按配置顺序绑定，匿名通道在健康节点间轮询。
+                  增删立即热应用；连通性测试打上游 Zen /v1/models，不影响线上流量。
+                </div>
+              </div>
+              <button id="proxy-refresh" class="ghost">刷新列表</button>
+            </div>
+            <div id="proxy-cards" class="conn-stats"></div>
+            <p id="proxy-error" class="error" role="status"></p>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>
+                      <input
+                        type="checkbox"
+                        id="proxy-select-all"
+                        class="proxy-check"
+                        title="全选 / 取消全选"
+                      />
+                    </th>
+                    <th>代理地址</th>
+                    <th>来源</th>
+                    <th>健康</th>
+                    <th>Key 绑定</th>
+                    <th>匿名</th>
+                    <th>测试结果</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="proxy-rows"></tbody>
+              </table>
+            </div>
+            <p class="section-caption" id="proxy-bulk-bar" role="status"></p>
+            <div class="actions">
+              <button id="proxy-select-all-btn" type="button" class="ghost">全选</button>
+              <button id="proxy-deselect-btn" type="button" class="ghost">取消全选</button>
+              <button id="proxy-test-selected" type="button" class="primary">
+                ⚡ 测试选中
+              </button>
+              <button id="proxy-enable-selected" type="button" class="ghost">✅ 启用选中</button>
+              <button id="proxy-disable-selected" type="button" class="ghost">⏸ 停用选中</button>
+              <button id="proxy-delete-selected" type="button" class="danger">
+                🗑 删除选中
+              </button>
+              <span id="proxy-test-progress" class="section-caption" role="status"></span>
+            </div>
+          </div>
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>添加代理</h2>
+                <div class="section-caption">
+                  支持 direct、http(s):// 与 socks5(h)://，可带 user:pass@ 认证。
+                </div>
+              </div>
+            </div>
+            <div class="conn-row">
+              <div class="field conn-msg">
+                <label>代理地址</label
+                ><input
+                  id="proxy-new-value"
+                  placeholder="http://user:pass@host:port"
+                  spellcheck="false"
+                />
+              </div>
+              <div class="field conn-btn">
+                <label>&nbsp;</label><button id="proxy-add" class="primary">➕ 添加</button>
+              </div>
+            </div>
+          </div>
+          <div class="section">
+            <div class="section-head">
+              <div>
+                <h2>批量添加</h2>
+                <div class="section-caption">每行一个代理，已存在的会自动跳过并提示。</div>
+              </div>
+              <button id="proxy-bulk-run" class="primary">📥 批量导入</button>
+            </div>
+            <div class="field">
+              <label>代理列表（每行一个）</label
+              ><textarea
+                id="proxy-bulk-text"
+                spellcheck="false"
+                placeholder="direct&#10;http://user:pass@host:port&#10;socks5://host:port"
+              ></textarea>
+            </div>
+            <p id="proxy-bulk-status" class="section-caption" role="status"></p>
           </div>
         </section>
         <section id="page-api-keys" class="page hidden">

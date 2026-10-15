@@ -25,6 +25,10 @@ type Config struct {
 	Anonymous         bool                         `json:"anonymous"`
 	Proxies           []string                     `json:"proxies"`
 	ProxyFile         string                       `json:"proxyfile"`
+	// DisabledProxies holds fingerprints of config.json proxies the operator
+	// disabled in the proxy page. Entries stay in Proxies (so edits there keep
+	// working) but are excluded from the runtime pool, like disabled server keys.
+	DisabledProxies map[string]bool `json:"disabled_proxies,omitempty"`
 	Upstream          UpstreamConfig               `json:"upstream"`
 	Retry             RetryConfig                  `json:"retry"`
 	Models            ModelsConfig                 `json:"models"`
@@ -35,6 +39,9 @@ type Config struct {
 	Reasoning         ReasoningConfig              `json:"reasoning"`
 
 	effectiveProxies []string
+	// proxyFileEntries caches the proxyfile-resolved entries at Normalize time
+	// so ProxySource can tell config.json entries apart from proxyfile ones.
+	proxyFileEntries []string
 }
 
 // ReasoningConfig forces a thinking level for requests that do not state one.
@@ -339,6 +346,33 @@ func (cfg *Config) PasswordForSave() {
 	cfg.effectiveProxies = nil
 }
 
+// ProxySource tells the operator UI where a runtime proxy came from: "config"
+// (config.json proxies), "proxyfile" (proxyfile entries), or "default" (the
+// implicit direct fallback when nothing is configured).
+func (cfg Config) ProxySource(value string) string {
+	if value == "direct" && len(cfg.Proxies) == 0 && cfg.ProxyFile == "" {
+		return "default"
+	}
+	for _, entry := range cfg.Proxies {
+		if entry == value {
+			return "config"
+		}
+	}
+	for _, entry := range cfg.proxyFileEntries {
+		if entry == value {
+			return "proxyfile"
+		}
+	}
+	return "config"
+}
+
+// ProxyEnabled reports whether a config.json proxy participates in routing.
+// Proxyfile entries and the implicit default are always enabled; only config
+// entries can be disabled via DisabledProxies.
+func (cfg Config) ProxyEnabled(value string) bool {
+	return !cfg.DisabledProxies[Fingerprint(value)]
+}
+
 func Clone(cfg Config) Config {
 	cfg.Rotation.SOTA.Order = append([]string(nil), cfg.Rotation.SOTA.Order...)
 	cfg.Rotation.Sweet.Order = append([]string(nil), cfg.Rotation.Sweet.Order...)
@@ -351,7 +385,15 @@ func Clone(cfg Config) Config {
 	cfg.ZenKeys = append([]string(nil), cfg.ZenKeys...)
 	cfg.GoKeys = append([]string(nil), cfg.GoKeys...)
 	cfg.Proxies = append([]string(nil), cfg.Proxies...)
+	if cfg.DisabledProxies != nil {
+		disabled := make(map[string]bool, len(cfg.DisabledProxies))
+		for id, off := range cfg.DisabledProxies {
+			disabled[id] = off
+		}
+		cfg.DisabledProxies = disabled
+	}
 	cfg.effectiveProxies = append([]string(nil), cfg.effectiveProxies...)
+	cfg.proxyFileEntries = append([]string(nil), cfg.proxyFileEntries...)
 	if cfg.Models.Protocols != nil {
 		protocols := make(map[string]string, len(cfg.Models.Protocols))
 		for key, value := range cfg.Models.Protocols {
