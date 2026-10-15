@@ -1089,7 +1089,8 @@ textarea {
 /* ===== 上游 Key 管理 ===== */
 .upk-add {
   display: grid;
-  grid-template-columns: 110px minmax(0, 1.2fr) minmax(0, 1fr) auto;
+  /* Tier / Key / 备注 / 代理绑定 / 按钮：5 个子项与 5 列一一对应 */
+  grid-template-columns: 100px minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1.2fr) auto;
   gap: 14px;
   align-items: end;
 }

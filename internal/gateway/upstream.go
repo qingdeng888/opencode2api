@@ -772,7 +772,12 @@ func (g *Gateway) observeKeyResult(ctx context.Context, nodes *nodePool, node *u
 		nodes.MarkSuccess(node)
 		return
 	}
-	if !proxyFailed || nodes.Proxy(node) == proxy {
+	// A transport failure of the proxy must not cool down keys that are no
+	// longer riding it: auto keys may have just been rebound to a healthy
+	// proxy, and rotate keys pick a fresh proxy on every attempt, so the
+	// failure says nothing about the key. Key-level rejections (429/401)
+	// still cool the key because proxyFailed is false for them.
+	if !proxyFailed || nodes.stillBound(node, proxy) {
 		nodes.MarkFailure(node, resp, err)
 	}
 }
