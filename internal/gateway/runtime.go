@@ -14,6 +14,7 @@ import (
 	modelcatalog "opencode2api/internal/models"
 	"opencode2api/internal/protocol"
 	"opencode2api/internal/rotation"
+	"opencode2api/internal/session"
 	"opencode2api/internal/telemetry"
 )
 
@@ -33,6 +34,7 @@ type ApplyResult struct {
 
 type RuntimeManager struct {
 	rotation           *rotation.Manager
+	sessions           *session.Mapper
 	configPath         string
 	root               context.Context
 	logger             *slog.Logger
@@ -58,6 +60,11 @@ func NewRuntimeManager(root context.Context, configPath string, cfg config.Confi
 		configPath: configPath, root: root, logger: logger, monitor: monitor, hub: hub, redactor: redactor, level: level,
 		effective: effectiveListeners{API: cfg.Listen, WebUI: cfg.WebUI.Listen, WebUIEnabled: cfg.WebUI.Enabled},
 	}
+	// The session mapper outlives hot reloads: conversations must keep their
+	// upstream session across a config save, or every save would silently
+	// start fresh upstream conversations for all active callers.
+	manager.sessions = session.NewMapper(time.Duration(cfg.Session.TTLSeconds) * time.Second)
+	go manager.sessions.Sweep(root)
 	manager.metadata = modelcatalog.NewPricingStore(configPath, logger)
 	// models.dev refreshes ride the active runtime's healthy proxy transports
 	// and fall back to the store's direct client when none are available.
@@ -117,7 +124,7 @@ func NewRuntimeManager(root context.Context, configPath string, cfg config.Confi
 }
 
 func (m *RuntimeManager) build(cfg config.Config) (*gatewayRuntime, error) {
-	gateway, err := New(cfg, m.logger, m.monitor)
+	gateway, err := New(cfg, m.logger, m.monitor, m.sessions)
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +268,9 @@ func (m *RuntimeManager) applyLocked(candidate config.Config, persist bool) (App
 		m.hub.Resize(normalized.Logging.RingSize)
 	}
 	m.rotation.Configure(normalized.Rotation)
+	// A shortened TTL applies to existing mappings immediately; active
+	// conversations re-slide on their next request.
+	m.sessions.SetTTL(time.Duration(normalized.Session.TTLSeconds) * time.Second)
 	next.gateway.syncRotation()
 	m.start(next)
 	previous := m.current.Swap(next)
@@ -358,6 +368,15 @@ func (m *RuntimeManager) Resources() ResourceSnapshot {
 		result.Proxies = append(result.Proxies, status)
 	}
 	return result
+}
+
+// SessionStats exposes the downstream→upstream session mapping counters for
+// the management UI (active mappings, TTL, hit/miss/mint/expiry rates).
+func (m *RuntimeManager) SessionStats() session.Stats {
+	if m.sessions == nil {
+		return session.Stats{}
+	}
+	return m.sessions.Stats()
 }
 
 func (m *RuntimeManager) DebugModels() ([]modelcatalog.RouteDiagnostic, modelcatalog.MetadataSnapshot) {

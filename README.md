@@ -247,6 +247,20 @@ Without an explicit ID, the first user message is used as a seed. Conversations 
 
 Cooldowns grow exponentially up to eight times `performance.failure_cooldown_seconds`, and a longer `Retry-After` is honored. If every authenticated key is cooling down, routing may try the key whose cooldown ends first. Anonymous nodes still in cooldown are skipped.
 
+### Session isolation
+
+The upstream free tier keeps server-side conversation state (prompt cache, reasoning reference chains) keyed by the `ses_*` session id. Two concurrent conversations sharing one upstream session interleave that state and cross-contaminate each other's replies.
+
+The gateway therefore gives every downstream conversation its own upstream session:
+
+- **Explicit ids win**: when the client sends `x-session-id` (or any of the accepted alternatives above), the gateway maps "caller key fingerprint + that id" to a freshly minted upstream session. Two callers using the same id never share one.
+- **No id**: the key is "caller key fingerprint + fingerprint of the first user message". Two users on the same key who send an identical first message still share an upstream session, so multi-user deployments should always send a session id.
+- **Native passthrough**: an id already in OpenCode's own format (`ses_` plus the descending timestamp) is forwarded verbatim, preserving the upstream conversation and cache the client owns.
+- **TTL and sliding**: a mapping idle for longer than `session.ttl_seconds` (default 900) is replaced on the next turn. Conversation history travels in the request body, so correctness is unaffected; only one cache hit is lost. Active conversations re-slide the window every turn.
+- **Capacity**: the map holds at most 100,000 entries, evicting expired entries first and then the least recently used one.
+
+Mappings survive configuration hot reloads (only the TTL is updated), so saving the configuration never interrupts a live conversation. The config center's "session isolation" panel shows active mappings, TTL, and mint/hit/expiry counters, and `request_routed` logs both `session` (upstream) and `client_session` (downstream) so the one-to-one mapping can be audited.
+
 ## Configuration reference
 
 See [config.example.json](config.example.json) for a complete starting configuration. JSON supports `//` and `/* ... */` comments; unknown fields and invalid values are rejected.
@@ -267,6 +281,7 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `models.refresh_seconds`    | `300`; minimum 1.                                                           |
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
 | `models.free_only`          | `false`; expose and route only free models, even with Zen or Go keys.       |
+| `session.ttl_seconds`       | `900` (15 min); range 60–86400. Idle window of the downstream→upstream session map, see "Session isolation". |
 | `reasoning.effort`          | Empty (off); `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `none`. |
 | `reasoning.effort_by_model` | `{}`; per-model overrides of `reasoning.effort`.                            |
 

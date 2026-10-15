@@ -21,16 +21,21 @@ type RequestMeta struct {
 	// conversation share it, so per-session token burn is visible in logs
 	// and monitoring: every session draws from the same upstream IP bucket
 	// on the anonymous lane.
-	Session   string
-	KeyID     string
-	Channel   string
-	Anonymous bool
-	Proxy     string
-	Attempts  int
-	Legs      []string
-	Stop      string
-	Tail      string
-	Stream    bool
+	Session string
+	// ClientSession is the downstream conversation identity (an explicit
+	// client id, or a "seed:<hash>" fingerprint of the first user message).
+	// Logging both sides makes cross-conversation mixing attributable: one
+	// client session must always map to exactly one upstream session.
+	ClientSession string
+	KeyID         string
+	Channel       string
+	Anonymous     bool
+	Proxy         string
+	Attempts      int
+	Legs          []string
+	Stop          string
+	Tail          string
+	Stream        bool
 	// ServerKeyID is the fingerprint of the local server key the caller
 	// authenticated with, so usage can be split per caller. KeyID is the
 	// upstream account that served the request.
@@ -125,7 +130,7 @@ func Middleware(monitor *Monitor, logger *slog.Logger, next http.Handler) http.H
 			if meta.Channel != "" {
 				logger.Info("request routed", "component", "http", "event", "request_routed", "method", r.Method,
 					"path", r.URL.Path, "status", status, "duration_ms", duration.Milliseconds(), "request_id", meta.Request,
-					"model", meta.Model, "model_alias", meta.ModelAlias, "session", meta.Session, "server_key_id", meta.ServerKeyID, "tier", meta.Tier, "key_id", meta.KeyID,
+					"model", meta.Model, "model_alias", meta.ModelAlias, "session", meta.Session, "client_session", meta.ClientSession, "server_key_id", meta.ServerKeyID, "tier", meta.Tier, "key_id", meta.KeyID,
 					"channel", meta.Channel, "anonymous", meta.Anonymous, "attempts", meta.Attempts, "legs", strings.Join(meta.Legs, " "), "stream", meta.Stream, "outcome", outcome,
 					"stop", meta.Stop, "in", meta.Usage.Input, "out", meta.Usage.Output, "reasoning_tokens", meta.Usage.Reasoning, "cached", meta.Usage.Cached, "tail", meta.Tail)
 			}

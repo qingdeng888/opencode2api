@@ -66,11 +66,12 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 	g.syncRotation()
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 	defer cancel()
-	ids := identity.DeriveRequestIDs(r, payload)
 	meta := telemetry.MetaFromRequest(r)
+	ids := g.requestIDs(r, payload, meta)
 	if meta != nil {
 		meta.Request = ids.Request
 		meta.Session = ids.Session
+		meta.ClientSession = ids.ClientSession
 		meta.ModelAlias = alias
 	}
 	visited := map[string]bool{}

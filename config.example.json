@@ -20,6 +20,9 @@
     "protocols": {},
     "free_only": false
   },
+  "session": {
+    "ttl_seconds": 900
+  },
   "performance": {
     "max_idle_conns": 2048,
     "max_idle_conns_per_host": 256,

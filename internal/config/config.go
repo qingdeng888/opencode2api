@@ -36,6 +36,7 @@ type Config struct {
 	Upstream        UpstreamConfig    `json:"upstream"`
 	Retry           RetryConfig       `json:"retry"`
 	Models          ModelsConfig      `json:"models"`
+	Session         SessionConfig     `json:"session"`
 	Performance     PerformanceConfig `json:"performance"`
 	Logging         LoggingConfig     `json:"logging"`
 	WebUI           WebUIConfig       `json:"webui"`
@@ -82,6 +83,16 @@ type ModelsConfig struct {
 	// FreeOnly limits discovery and routing to free models, even when Zen or
 	// Go keys could serve paid ones. Free models may still fall back to keys.
 	FreeOnly bool `json:"free_only"`
+}
+
+// SessionConfig controls the downstream→upstream conversation mapping that
+// isolates concurrent conversations on the upstream free tier.
+type SessionConfig struct {
+	// TTLSeconds is the sliding idle window of one mapping. An active
+	// conversation keeps its upstream session (and prompt cache) as long as
+	// turns keep arriving inside the window; after it expires the next turn
+	// starts a fresh upstream session.
+	TTLSeconds int `json:"ttl_seconds"`
 }
 
 type LoggingConfig struct {
@@ -151,6 +162,7 @@ func Load(path string) (Config, error) {
 		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
 		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
+		Session:     SessionConfig{TTLSeconds: 900},
 		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15},
 		Logging:     LoggingConfig{Level: "info", RingSize: 2000},
 		WebUI:       WebUIConfig{Listen: "0.0.0.0:8081", SessionTTLMinutes: 720},
@@ -216,6 +228,12 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Models.RefreshSeconds < 1 {
 		return Config{}, errors.New("models.refresh_seconds must be at least 1")
+	}
+	if cfg.Session.TTLSeconds == 0 {
+		cfg.Session.TTLSeconds = 900
+	}
+	if cfg.Session.TTLSeconds < 60 || cfg.Session.TTLSeconds > 86400 {
+		return Config{}, errors.New("session.ttl_seconds must be between 60 and 86400")
 	}
 	if cfg.Performance.MaxIdleConns < 1 || cfg.Performance.MaxIdleConnsPerHost < 1 || cfg.Performance.MaxConnsPerHost < 0 || cfg.Performance.IdleConnTimeoutSeconds < 1 || cfg.Performance.ConnectTimeoutSeconds < 1 || cfg.Performance.FailureCooldownSeconds < 1 {
 		return Config{}, errors.New("performance values must be positive (max_conns_per_host may be zero for unlimited)")

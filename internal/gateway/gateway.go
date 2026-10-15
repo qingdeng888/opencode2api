@@ -20,6 +20,7 @@ import (
 	"opencode2api/internal/models"
 	wire "opencode2api/internal/protocol"
 	"opencode2api/internal/rotation"
+	"opencode2api/internal/session"
 	"opencode2api/internal/telemetry"
 )
 
@@ -52,12 +53,15 @@ type Gateway struct {
 	catalog      *models.Catalog
 	monitor      *telemetry.Monitor
 	availability *models.AvailabilityStore
+	// sessions maps each downstream conversation to its own upstream session
+	// so concurrent callers never share upstream conversation state.
+	sessions *session.Mapper
 	// attemptTimeout bounds a whole upstream attempt (dial + write + headers +
 	// first event), not just the header wait. Zero keeps the legacy behavior.
 	attemptTimeout time.Duration
 }
 
-func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*Gateway, error) {
+func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor, sessions *session.Mapper) (*Gateway, error) {
 	cfg.Rotation.Defaults()
 	rotationManager, err := rotation.New("", cfg.Rotation)
 	if err != nil {
@@ -89,6 +93,7 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor) (*G
 		anonymous:      newAnonymousPool(cfg.Anonymous, transports, cooldown),
 		catalog:        catalog,
 		monitor:        monitor,
+		sessions:       sessions,
 		attemptTimeout: attemptDeadline(cfg),
 	}, nil
 }
@@ -139,6 +144,34 @@ func (g *Gateway) authenticate(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// sessionResolver picks the mapping used for one request.
+//
+// Production traffic maps through the shared Mapper, scoped by the local
+// server key the caller authenticated with: two callers holding different API
+// keys can never share an upstream session even when their conversation
+// signals are identical.
+//
+// Diagnostic (Playground) traffic gets a OneShot resolver instead. A
+// diagnostic must describe exactly the request the operator just sent, so it
+// must not reuse an upstream session a previous probe warmed, and it must not
+// occupy a slot in the live mapping table either.
+func (g *Gateway) sessionResolver(ctx context.Context, meta *telemetry.RequestMeta) (identity.Resolver, string) {
+	if isDiagnosticRequest(ctx) {
+		return session.OneShot{}, ""
+	}
+	if meta == nil || meta.ServerKeyID == "" {
+		return g.sessions, "default"
+	}
+	return g.sessions, meta.ServerKeyID
+}
+
+// requestIDs derives the upstream identity for one request, choosing the
+// production mapper or the one-shot diagnostic resolver as appropriate.
+func (g *Gateway) requestIDs(r *http.Request, payload map[string]any, meta *telemetry.RequestMeta) identity.RequestIDs {
+	resolver, scope := g.sessionResolver(r.Context(), meta)
+	return identity.DeriveRequestIDs(r, payload, resolver, scope)
 }
 
 func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
@@ -202,10 +235,11 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			wire.WriteError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "")
 			return
 		}
-		ids := identity.DeriveRequestIDs(r, payload)
+		ids := g.requestIDs(r, payload, meta)
 		if meta != nil {
 			meta.Request = ids.Request
 			meta.Session = ids.Session
+			meta.ClientSession = ids.ClientSession
 		}
 		stream := jsonutil.BoolAt(payload, "stream")
 		requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
@@ -374,10 +408,11 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	for _, tier := range route.KeyTiers {
 		bodies[tier] = body
 	}
-	ids := identity.DeriveRequestIDs(r, payload)
+	ids := g.requestIDs(r, payload, meta)
 	if meta != nil {
 		meta.Request = ids.Request
 		meta.Session = ids.Session
+		meta.ClientSession = ids.ClientSession
 	}
 	requestCtx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 	defer cancel()

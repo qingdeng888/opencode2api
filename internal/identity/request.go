@@ -30,9 +30,21 @@ type RequestIDs struct {
 	Request       string
 	Project       string
 	ParentSession string
+	// ClientSession is the downstream conversation identity, safe for logs:
+	// explicit ids pass through verbatim, message-content seeds are replaced
+	// by a short stable fingerprint so conversation text never reaches the
+	// log ring.
+	ClientSession string
 }
 
-func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
+// Resolver maps one downstream conversation signal to the upstream session id
+// that should carry it. The session.Mapper implements it; a nil Resolver
+// keeps the legacy deterministic derivation.
+type Resolver interface {
+	Resolve(scope, signal string) string
+}
+
+func DeriveRequestIDs(r *http.Request, body map[string]any, resolver Resolver, scope string) RequestIDs {
 	signal := jsonutil.FirstString(
 		r.Header.Get("x-opencode-session"),
 		r.Header.Get("x-opencode-session-id"),
@@ -43,18 +55,39 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 		jsonutil.StringAt(body, "conversation_id"),
 		jsonutil.StringAt(body, "metadata", "session_id"),
 	)
+	// explicit tracks whether the signal is a client-declared conversation id
+	// (loggable verbatim) or derived from message content (fingerprinted).
+	explicit := signal != ""
 	if signal == "" {
 		// Using the first user turn keeps a multi-turn conversation stable as its
 		// history grows while separating conversations with different beginnings.
 		signal = conversationSeed(body)
 	}
+	seeded := !explicit && signal != ""
 	if signal == "" {
 		signal = jsonutil.StringAt(body, "previous_response_id")
+		explicit = signal != ""
 	}
 	if signal == "" || signal == `{}` {
 		signal = RandomID("fallback", 16)
+		explicit = true
 	}
+	clientSession := signal
+	if seeded {
+		sum := sha256.Sum256([]byte("client-session-seed\x00" + signal))
+		clientSession = "seed:" + hex.EncodeToString(sum[:6])
+	}
+	// A genuine OpenCode CLI session passes through untouched: re-mapping it
+	// would detach the request from the upstream conversation (and prompt
+	// cache) the client already owns. Everything else goes through the
+	// resolver, which mints a unique upstream session per downstream
+	// conversation instead of deriving one from content — identical first
+	// messages from different users used to collide onto one upstream session
+	// and cross-contaminate concurrent replies.
 	session := CanonicalSessionID(signal)
+	if resolver != nil && !IsNativeSession(signal) {
+		session = resolver.Resolve(scope, signal)
+	}
 	// The upstream free tier 403s canonical prj_* project ids (2026-10-14
 	// probing) while accepting the literal "global" every official client
 	// sends. Anything non-canonical also passes, so the project header is only
@@ -72,7 +105,16 @@ func DeriveRequestIDs(r *http.Request, body map[string]any) RequestIDs {
 		Request:       RandomID("req", 16),
 		Project:       projectSignal,
 		ParentSession: parentSession,
+		ClientSession: clientSession,
 	}
+}
+
+// IsNativeSession reports whether signal is an official OpenCode session id
+// minted by Identifier.descending(): canonical ses_ shape plus the accepted
+// descending time-part window. Only these are safe to forward verbatim.
+func IsNativeSession(signal string) bool {
+	return canonicalSessionPattern.MatchString(signal) &&
+		descendingTimePartPattern.MatchString(signal[4:16])
 }
 
 func conversationSeed(body map[string]any) string {

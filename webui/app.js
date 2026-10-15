@@ -150,6 +150,7 @@ function fillConfig(value) {
   $("#c-attempts").value = value.retry.max_attempts;
   $("#c-timeout").value = value.retry.timeout_seconds;
   $("#c-refresh").value = value.models.refresh_seconds;
+  $("#c-session-ttl").value = value.session?.ttl_seconds ?? 900;
   $("#c-protocols").value = JSON.stringify(value.models.protocols || {}, null, 2);
   $("#c-free-only").checked = !!value.models.free_only;
   const reasoning = value.reasoning || {};
@@ -190,6 +191,7 @@ $("#config-form").addEventListener("submit", async (event) => {
         protocols: JSON.parse($("#c-protocols").value || "{}"),
         free_only: $("#c-free-only").checked,
       },
+      session: { ttl_seconds: number("#c-session-ttl") },
       reasoning: {
         effort: $("#c-reasoning-effort").value,
         effort_by_model: JSON.parse($("#c-reasoning-by-model").value || "{}"),
@@ -1541,6 +1543,7 @@ async function refreshMonitor() {
     $("#m-p95").textContent = `${metrics.last_hour.p95_ms || 0} ms`;
     $("#m-active").textContent = `${metrics.active_requests || 0} / ${metrics.active_streams || 0}`;
     renderResources(monitorData.resources);
+    renderSessionStats(monitorData.sessions);
     renderBreakdowns(metrics);
     renderGuide();
     renderUsage();
@@ -1552,8 +1555,21 @@ $("#refresh-now").onclick = async () => {
   if (location.hash === "#model-quotas") await loadModelQuotas();
   if (location.hash === "#api-keys") await loadAPIKeys();
   if (location.hash === "#proxies") await loadProxies();
+  if (location.hash === "#upstream-keys") await loadUpstreamKeys(true);
   toast("状态已刷新");
 };
+function renderSessionStats(sessions) {
+  const host = $("#session-stats");
+  if (!host) return;
+  if (!sessions) {
+    host.textContent = "—";
+    return;
+  }
+  host.textContent =
+    `活跃映射 ${sessions.active} 个 · TTL ${sessions.ttl_seconds}s · ` +
+    `铸造 ${sessions.minted} · 命中 ${sessions.hits} · 过期 ${sessions.expired}` +
+    (sessions.evictions ? ` · 容量淘汰 ${sessions.evictions}` : "");
+}
 function derivedAPIBase() {
   if (!config) return `${location.protocol}//${location.hostname}:8080`;
   const listen = config.effective?.listen || config.listen || ":8080";

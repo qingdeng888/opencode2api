@@ -284,6 +284,12 @@
                   </li>
                   <li>流式请求会保持原协议事件；跨协议时由 Gateway 转换。</li>
                   <li>若配置监听地址为 <code>0.0.0.0</code>，示例会改用当前浏览器主机名。</li>
+                  <li>
+                    <strong>会话隔离</strong>：多用户/多对话并发接入时，请为每个对话传
+                    <code>x-session-id</code>（或 <code>conversation-id</code>）头，网关会把它映射为独立的上游会话。
+                    不传时按「调用方 API Key + 首条消息指纹」隔离——同一个 Key
+                    下两个用户恰好发送完全相同的首条消息仍会共享上游会话，所以多用户服务务必传会话头。
+                  </li>
                 </ul>
               </div>
             </div>
@@ -591,6 +597,28 @@
                 <div class="field">
                   <label>模型协议覆盖（JSON）</label
                   ><textarea id="c-protocols" spellcheck="false">{}</textarea>
+                </div>
+              </div>
+            </div>
+            <div class="section">
+              <div class="section-head">
+                <div>
+                  <h2>会话隔离</h2>
+                  <div class="section-caption">
+                    每个下游会话（客户端会话头，或按调用方 Key
+                    隔离的首条消息指纹）映射到独立的上游会话，防止并发对话在上游串台。空闲超过
+                    TTL 后下一轮会开启新的上游会话（对话历史在请求体里，正确性不受影响，仅损失一次缓存命中）。
+                  </div>
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field">
+                  <label>映射缓存 TTL（秒，60–86400）</label
+                  ><input id="c-session-ttl" type="number" min="60" max="86400" />
+                </div>
+                <div class="field">
+                  <label>当前映射状态</label>
+                  <div id="session-stats" class="section-caption">—</div>
                 </div>
               </div>
             </div>

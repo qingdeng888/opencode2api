@@ -131,6 +131,7 @@ type ConfigView struct {
 	Upstream    config.UpstreamConfig    `json:"upstream"`
 	Retry       config.RetryConfig       `json:"retry"`
 	Models      config.ModelsConfig      `json:"models"`
+	Session     config.SessionConfig     `json:"session"`
 	Performance config.PerformanceConfig `json:"performance"`
 	Logging     config.LoggingConfig     `json:"logging"`
 	Prefer      config.Tier              `json:"prefer"`
@@ -164,15 +165,18 @@ type ConfigUpdate struct {
 	// stale or partial client can never wipe keys) from an explicit empty list
 	// (clear everything). Server keys live on the API Key page and zen/go keys
 	// on the upstream key page; the config center only submits what it renders.
-	ServerKeys  *[]SecretInput           `json:"server_keys,omitempty"`
-	ZenKeys     *[]SecretInput           `json:"zen_keys,omitempty"`
-	GoKeys      *[]SecretInput           `json:"go_keys,omitempty"`
-	Anonymous   *bool                    `json:"anonymous,omitempty"`
-	Proxies     *[]SecretInput           `json:"proxies,omitempty"`
-	ProxyFile   string                   `json:"proxyfile"`
-	Upstream    config.UpstreamConfig    `json:"upstream"`
-	Retry       config.RetryConfig       `json:"retry"`
-	Models      config.ModelsConfig      `json:"models"`
+	ServerKeys *[]SecretInput        `json:"server_keys,omitempty"`
+	ZenKeys    *[]SecretInput        `json:"zen_keys,omitempty"`
+	GoKeys     *[]SecretInput        `json:"go_keys,omitempty"`
+	Anonymous  *bool                 `json:"anonymous,omitempty"`
+	Proxies    *[]SecretInput        `json:"proxies,omitempty"`
+	ProxyFile  string                `json:"proxyfile"`
+	Upstream   config.UpstreamConfig `json:"upstream"`
+	Retry      config.RetryConfig    `json:"retry"`
+	Models     config.ModelsConfig   `json:"models"`
+	// A pointer keeps the current session mapping TTL when the field is
+	// omitted, matching the reasoning-config convention.
+	Session     *config.SessionConfig    `json:"session,omitempty"`
 	Performance config.PerformanceConfig `json:"performance"`
 	Logging     config.LoggingConfig     `json:"logging"`
 	Prefer      config.Tier              `json:"prefer"`
@@ -230,12 +234,16 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if update.Reasoning != nil {
 		reasoning = *update.Reasoning
 	}
+	session := current.Session
+	if update.Session != nil {
+		session = *update.Session
+	}
 	candidate := config.Config{
 		ServerKeyMetadata:   current.ServerKeyMetadata,
 		UpstreamKeyMetadata: current.UpstreamKeyMetadata,
 		Rotation:            current.Rotation,
 		Listen:              update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
-		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
+		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Session: session, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},
 	}
@@ -279,6 +287,7 @@ func (a *Server) handleMonitor(w http.ResponseWriter, _ *http.Request) {
 	metrics := a.monitor.Snapshot()
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"version": buildinfo.Version, "metrics": metrics, "usage": metrics.Usage, "upstream": metrics.Upstream, "resources": a.manager.Resources(),
+		"sessions": a.manager.SessionStats(),
 	})
 }
 
@@ -362,6 +371,7 @@ func (a *Server) configView() ConfigView {
 	return ConfigView{
 		Listen: cfg.Listen, ServerKeys: maskSecrets(cfg.ServerKeys, false), ZenKeys: maskSecrets(cfg.ZenKeys, false), GoKeys: maskSecrets(cfg.GoKeys, false), Anonymous: cfg.Anonymous,
 		Proxies: maskSecrets(cfg.Proxies, true), ProxyFile: cfg.ProxyFile, Upstream: cfg.Upstream, Retry: cfg.Retry, Models: cfg.Models,
+		Session:     cfg.Session,
 		Performance: cfg.Performance, Logging: cfg.Logging, Prefer: cfg.Prefer, Reasoning: cfg.Reasoning,
 		WebUI:     WebUIView{Enabled: cfg.WebUI.Enabled, Listen: cfg.WebUI.Listen, Username: cfg.WebUI.Username, SessionTTLMinutes: cfg.WebUI.SessionTTLMinutes},
 		Effective: EffectiveView{Listen: effective.API, WebUIListen: effective.WebUI, WebUIEnabled: effective.WebUIEnabled},
