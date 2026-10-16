@@ -971,9 +971,18 @@
               <table class="table">
                 <thead>
                   <tr>
+                    <th>
+                      <input
+                        type="checkbox"
+                        id="upk-select-all"
+                        class="proxy-check"
+                        title="全选 / 取消全选"
+                      />
+                    </th>
                     <th>Tier</th>
                     <th>Key（掩码）</th>
                     <th>备注</th>
+                    <th>状态</th>
                     <th>绑定代理 / 模式</th>
                     <th>失败 / 冷却</th>
                     <th>创建时间</th>
@@ -983,6 +992,18 @@
                 <tbody id="upk-rows"></tbody>
               </table>
             </div>
+            <p class="section-caption" id="upk-bulk-bar" role="status"></p>
+            <div class="actions">
+              <button id="upk-select-all-btn" type="button" class="ghost">全选</button>
+              <button id="upk-deselect-btn" type="button" class="ghost">取消全选</button>
+              <button id="upk-enable-selected" type="button" class="ghost">✅ 启用选中</button>
+              <button id="upk-disable-selected" type="button" class="ghost">⏸ 停用选中</button>
+              <span id="upk-bulk-progress" class="section-caption" role="status"></span>
+            </div>
+            <p class="section-caption">
+              停用只是把该 Key 从上游池剔除（备注、绑定与顺序都保留），随时可再启用；删除才会真正移除。
+              关闭匿名通道时必须至少保留一个启用的 Key，否则保存会被拒绝。
+            </p>
           </div>
           <div class="section">
             <div class="section-head">

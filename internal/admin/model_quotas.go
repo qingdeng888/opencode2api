@@ -114,17 +114,20 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	cfg := a.manager.Config()
 	endpoint := strings.TrimRight(cfg.Upstream.Go, "/") + "/v1/usage"
-	accounts := make([]quotaAccount, len(cfg.GoKeys))
+	// Disabled Go keys cannot serve requests, so their quota is neither
+	// meaningful nor worth an upstream query.
+	goKeys := cfg.EnabledGoKeys()
+	accounts := make([]quotaAccount, len(goKeys))
 	// Coalesce refreshes from multiple browser tabs; at most four upstream
 	// queries run at a time. The cache is pruned when upstream credentials change.
 	a.quotaMu.Lock()
 	if a.quotaCache == nil {
 		a.quotaCache = map[string]quotaCacheEntry{}
 	}
-	entries := make([]quotaCacheEntry, len(cfg.GoKeys))
+	entries := make([]quotaCacheEntry, len(goKeys))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
-	for i, key := range cfg.GoKeys {
+	for i, key := range goKeys {
 		cacheID := endpoint + "|" + config.Fingerprint(key)
 		previous := a.quotaCache[cacheID]
 		if time.Now().Before(previous.Expires) {
@@ -145,7 +148,7 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 	newCache := map[string]quotaCacheEntry{}
-	for i, key := range cfg.GoKeys {
+	for i, key := range goKeys {
 		newCache[endpoint+"|"+config.Fingerprint(key)] = entries[i]
 		accounts[i] = entries[i].Account
 	}

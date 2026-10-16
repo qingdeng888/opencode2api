@@ -1112,6 +1112,13 @@ textarea {
   overflow-wrap: anywhere;
   max-width: 260px;
 }
+/* 停用的上游 Key：整行降饱和，一眼区分是否参与路由。 */
+.row-disabled {
+  opacity: 0.55;
+}
+.row-disabled td {
+  color: var(--text2);
+}
 
 /* ===== 代理管理 ===== */
 .conn-stats {

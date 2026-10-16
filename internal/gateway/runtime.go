@@ -312,7 +312,11 @@ type ResourceSnapshot struct {
 }
 
 type KeyStatus struct {
-	ID            string     `json:"id"`
+	ID string `json:"id"`
+	// Fingerprint is the stable identity of the key. Admin views must align
+	// live state by fingerprint, never by index: Index is the position inside
+	// the enabled pool, which shifts as soon as a key is disabled.
+	Fingerprint   string     `json:"fingerprint"`
 	Tier          string     `json:"tier"`
 	Index         int        `json:"index"`
 	ProxyIndex    int        `json:"proxy_index"`
@@ -388,7 +392,7 @@ func (m *RuntimeManager) DebugModels() ([]modelcatalog.RouteDiagnostic, modelcat
 	models := gateway.catalog.List()
 	result := make([]modelcatalog.RouteDiagnostic, 0, len(models))
 	for _, model := range models {
-		result = append(result, gateway.catalog.Diagnostic(model, "", len(gateway.cfg.ZenKeys) > 0, len(gateway.cfg.GoKeys) > 0, gateway.cfg.Anonymous))
+		result = append(result, gateway.catalog.Diagnostic(model, "", gateway.hasZenKeys(), gateway.hasGoKeys(), gateway.cfg.Anonymous))
 	}
 	metadata := gateway.catalog.MetadataSnapshot()
 	return result, metadata
@@ -415,7 +419,7 @@ func (m *RuntimeManager) DebugRoute(model string, requested protocol.Protocol) m
 		return modelcatalog.RouteDiagnostic{Model: model, RequestedProtocol: requested, RouteError: "gateway runtime is unavailable"}
 	}
 	gateway := runtime.gateway
-	return gateway.catalog.Diagnostic(model, requested, len(gateway.cfg.ZenKeys) > 0, len(gateway.cfg.GoKeys) > 0, gateway.cfg.Anonymous)
+	return gateway.catalog.Diagnostic(model, requested, gateway.hasZenKeys(), gateway.hasGoKeys(), gateway.cfg.Anonymous)
 }
 
 // DebugKeyView is the operator-facing view of one configured upstream key. It
@@ -474,7 +478,7 @@ func (m *RuntimeManager) DebugRouteForTier(model string, tier config.Tier) (mode
 		return modelcatalog.RouteDiagnostic{Model: model, RouteError: "gateway runtime is unavailable"}, fmt.Errorf("gateway runtime is unavailable")
 	}
 	gateway := runtime.gateway
-	hasZen, hasGo := len(gateway.cfg.ZenKeys) > 0, len(gateway.cfg.GoKeys) > 0
+	hasZen, hasGo := gateway.hasZenKeys(), gateway.hasGoKeys()
 	diagnostic := gateway.catalog.Diagnostic(model, "", hasZen, hasGo, false)
 	route, err := gateway.catalog.RouteForTier(model, tier, hasZen, hasGo)
 	if err != nil {
@@ -491,7 +495,7 @@ func (m *RuntimeManager) DebugRouteForTier(model string, tier config.Tier) (mode
 func keyStatuses(tier string, pool *nodePool) []KeyStatus {
 	result := make([]KeyStatus, 0, len(pool.nodes))
 	for _, node := range pool.nodes {
-		status := KeyStatus{ID: config.KeyDisplayID(node.key), Tier: tier, Index: node.index, ProxyIndex: int(node.proxyIndex.Load()), ProxyMode: node.proxyMode, Failures: node.failures.Load()}
+		status := KeyStatus{ID: config.KeyDisplayID(node.key), Fingerprint: config.Fingerprint(node.key), Tier: tier, Index: node.index, ProxyIndex: int(node.proxyIndex.Load()), ProxyMode: node.proxyMode, Failures: node.failures.Load()}
 		if node.proxyMode == config.ProxyModeBind && status.ProxyIndex >= 0 && status.ProxyIndex < len(pool.transports.items) {
 			status.ProxyID = config.Fingerprint(pool.transports.items[status.ProxyIndex].name)
 		}

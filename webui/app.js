@@ -659,12 +659,20 @@ $("#proxy-refresh").onclick = () => loadProxies();
 
 /* ===== 上游 Key 管理（独立页）：Zen / Go Key 列表、备注、增删、匿名开关 ===== */
 let upstreamKeyData = [],
-  upstreamProxyOptions = [];
+  upstreamProxyOptions = [],
+  upstreamKeySelected = {},
+  upstreamKeyBusy = false;
 async function loadUpstreamKeys(silent = false) {
   try {
     const data = await api("/api/upstream-keys");
     upstreamKeyData = data.keys || [];
     upstreamProxyOptions = data.proxies || [];
+    // 已删除的 Key 不能残留在勾选集里，否则批量操作会带上不存在的 id。
+    const alive = {};
+    upstreamKeyData.forEach((key) => (alive[key.id] = true));
+    Object.keys(upstreamKeySelected).forEach((id) => {
+      if (!alive[id]) delete upstreamKeySelected[id];
+    });
     renderUpstreamKeys(data);
     if (!silent) $("#upk-error").textContent = "";
   } catch (error) {
@@ -674,6 +682,64 @@ async function loadUpstreamKeys(silent = false) {
     }
   }
 }
+function upstreamSelectedIds() {
+  return upstreamKeyData.filter((key) => upstreamKeySelected[key.id]).map((key) => key.id);
+}
+function setAllUpstreamKeysSelected(selected) {
+  upstreamKeySelected = {};
+  if (selected) upstreamKeyData.forEach((key) => (upstreamKeySelected[key.id] = true));
+  renderUpstreamKeys({ anonymous: $("#upk-anonymous")?.checked });
+}
+function updateUpstreamKeyBulkCount() {
+  const count = upstreamSelectedIds().length;
+  const bar = $("#upk-bulk-bar");
+  if (bar) bar.textContent = count ? `已选 ${count} / 共 ${upstreamKeyData.length} 个` : "";
+  const all = $("#upk-select-all");
+  if (all) {
+    all.checked = upstreamKeyData.length > 0 && count === upstreamKeyData.length;
+    all.indeterminate = count > 0 && count < upstreamKeyData.length;
+  }
+  ["#upk-enable-selected", "#upk-disable-selected"].forEach((selector) => {
+    const button = $(selector);
+    if (button) button.disabled = upstreamKeyBusy || count === 0;
+  });
+}
+async function setUpstreamKeysEnabled(ids, enabled, quiet = false) {
+  if (!ids.length) {
+    if (!quiet) toast("请先勾选上游 Key", true);
+    return 0;
+  }
+  if (upstreamKeyBusy) return 0;
+  upstreamKeyBusy = true;
+  updateUpstreamKeyBulkCount();
+  try {
+    const data = await api("/api/upstream-keys/enabled", {
+      method: "POST",
+      body: JSON.stringify({ ids, enabled }),
+    });
+    upstreamKeyData = data.keys || [];
+    if (data.proxies) upstreamProxyOptions = data.proxies;
+    const skipped = (data.skipped || []).length ? `，跳过 ${data.skipped.length} 个未知 Key` : "";
+    if (!quiet) toast(`已${enabled ? "启用" : "停用"} ${(data.changed || []).length} 个上游 Key${skipped}`);
+    // 停用会重建上游池，模型可用性随之变化；刷新但不阻塞按钮恢复。
+    loadDebugModels().catch(() => {});
+    refreshMonitor().catch(() => {});
+    return (data.changed || []).length;
+  } catch (error) {
+    // 关闭匿名且这是最后一个启用的 Key 时，配置校验会拒绝保存。
+    if (!quiet) toast(error.message, true);
+    return 0;
+  } finally {
+    upstreamKeyBusy = false;
+    // 行内按钮是在 busy 期间渲染的，必须重绘才能恢复可点。
+    renderUpstreamKeys({ anonymous: $("#upk-anonymous")?.checked });
+  }
+}
+$("#upk-select-all-btn").onclick = () => setAllUpstreamKeysSelected(true);
+$("#upk-deselect-btn").onclick = () => setAllUpstreamKeysSelected(false);
+$("#upk-select-all").onchange = (event) => setAllUpstreamKeysSelected(event.target.checked);
+$("#upk-enable-selected").onclick = () => setUpstreamKeysEnabled(upstreamSelectedIds(), true);
+$("#upk-disable-selected").onclick = () => setUpstreamKeysEnabled(upstreamSelectedIds(), false);
 /* 收集 <select> 的候选值；浏览器里 options 总是存在，回退分支让无头测试
    也能跑（假 DOM 只有 children/optgroup 树）。 */
 function selectOptionValues(select) {
@@ -725,6 +791,20 @@ function renderUpstreamKeys(data = {}) {
   rows.replaceChildren();
   upstreamKeyData.forEach((key) => {
     const row = document.createElement("tr");
+    if (key.enabled === false) row.className = "row-disabled";
+    const checkCell = document.createElement("td");
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "proxy-check";
+    check.dataset.kid = key.id;
+    check.checked = !!upstreamKeySelected[key.id];
+    check.onchange = () => {
+      if (check.checked) upstreamKeySelected[key.id] = true;
+      else delete upstreamKeySelected[key.id];
+      updateUpstreamKeyBulkCount();
+    };
+    checkCell.appendChild(check);
+    row.appendChild(checkCell);
     const tierCell = document.createElement("td");
     const tierBadge = document.createElement("span");
     tierBadge.className = `pill ${key.tier === "go" ? "ok" : ""}`;
@@ -769,6 +849,20 @@ function renderUpstreamKeys(data = {}) {
       noteCell.textContent = key.note || "—";
     }
     row.appendChild(noteCell);
+    // 启用状态：停用的 Key 不参与路由，失败/冷却列对它没有意义。
+    const stateCell = document.createElement("td");
+    if (key.enabled === false) {
+      const badge = document.createElement("span");
+      badge.className = "status warn";
+      badge.textContent = "已停用";
+      stateCell.appendChild(badge);
+    } else {
+      const badge = document.createElement("span");
+      badge.className = "status ok";
+      badge.textContent = key.in_pool ? "启用中" : "启用（待生效）";
+      stateCell.appendChild(badge);
+    }
+    row.appendChild(stateCell);
     // 绑定代理：模式下拉（自动 / 轮询 / 指定某个代理），改选即热生效。
     const proxyCell = document.createElement("td");
     const modeSelect = document.createElement("select");
@@ -813,12 +907,19 @@ function renderUpstreamKeys(data = {}) {
       proxyCell.appendChild(shown);
     }
     row.appendChild(proxyCell);
-    const cooldown = key.cooldown_until
-      ? `冷却至 ${new Date(key.cooldown_until).toLocaleTimeString()}`
-      : key.failures
-        ? `失败 ${key.failures} 次`
-        : "正常";
-    appendCell(row, cooldown, key.cooldown_until ? "warn" : key.failures ? "warn" : "ok");
+    const cooldown =
+      key.enabled === false
+        ? "—"
+        : key.cooldown_until
+          ? `冷却至 ${new Date(key.cooldown_until).toLocaleTimeString()}`
+          : key.failures
+            ? `失败 ${key.failures} 次`
+            : "正常";
+    appendCell(
+      row,
+      cooldown,
+      key.enabled === false ? "" : key.cooldown_until ? "warn" : key.failures ? "warn" : "ok",
+    );
     appendCell(
       row,
       key.created_at ? new Date(key.created_at).toLocaleString() : "—",
@@ -834,6 +935,12 @@ function renderUpstreamKeys(data = {}) {
       renderUpstreamKeys({ anonymous: data.anonymous });
     };
     actions.appendChild(editButton);
+    const toggleButton = document.createElement("button");
+    toggleButton.className = "ghost";
+    toggleButton.textContent = key.enabled === false ? "启用" : "停用";
+    toggleButton.disabled = !!upstreamKeyBusy;
+    toggleButton.onclick = () => setUpstreamKeysEnabled([key.id], key.enabled === false);
+    actions.appendChild(toggleButton);
     const delButton = document.createElement("button");
     delButton.className = "ghost";
     delButton.textContent = "删除";
@@ -843,7 +950,12 @@ function renderUpstreamKeys(data = {}) {
     rows.appendChild(row);
   });
   if (!upstreamKeyData.length)
-    emptyRow(rows, 7, "暂无上游 Key：匿名通道开启时免费模型仍可用，添加 Key 可获得独立配额兜底。");
+    emptyRow(
+      rows,
+      9,
+      "暂无上游 Key：匿名通道开启时免费模型仍可用，添加 Key 可获得独立配额兜底。",
+    );
+  updateUpstreamKeyBulkCount();
 }
 async function setUpstreamKeyProxy(key, select) {
   const value = select.value;

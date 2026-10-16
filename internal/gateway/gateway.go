@@ -72,11 +72,11 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Monitor, ses
 		return nil, err
 	}
 	cooldown := time.Duration(cfg.Performance.FailureCooldownSeconds) * time.Second
-	zenNodes, err := newNodePool(cfg.ZenKeys, transports, cooldown, cfg.UpstreamKeyBinding)
+	zenNodes, err := newNodePool(cfg.EnabledZenKeys(), transports, cooldown, cfg.UpstreamKeyBinding)
 	if err != nil {
 		return nil, fmt.Errorf("zen node pool: %w", err)
 	}
-	goNodes, err := newNodePool(cfg.GoKeys, transports, cooldown, cfg.UpstreamKeyBinding)
+	goNodes, err := newNodePool(cfg.EnabledGoKeys(), transports, cooldown, cfg.UpstreamKeyBinding)
 	if err != nil {
 		return nil, fmt.Errorf("go node pool: %w", err)
 	}
@@ -146,6 +146,14 @@ func (g *Gateway) authenticate(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// hasZenKeys / hasGoKeys report whether a tier can actually serve requests.
+// The pools are built from enabled keys only, so the pool length is the
+// authoritative count: a disabled key must not keep a tier looking available
+// while nothing can serve it. Both are allocation-free.
+func (g *Gateway) hasZenKeys() bool { return g.zenNodes.Len() > 0 }
+
+func (g *Gateway) hasGoKeys() bool { return g.goNodes.Len() > 0 }
+
 // sessionResolver picks the mapping used for one request.
 //
 // Production traffic maps through the shared Mapper, scoped by the local
@@ -203,11 +211,11 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			wire.WriteError(w, external, http.StatusBadRequest, "the model uses an upstream protocol that opencode2api does not expose", "invalid_request_error", "model")
 			return
 		}
-		route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+		route, err := g.catalog.Route(model, g.hasZenKeys(), g.hasGoKeys(), g.cfg.Anonymous)
 		if override, selected := debugKeyOverrideFrom(r.Context()); selected {
 			// A per-key diagnostic must not silently be served by another key,
 			// another tier or the anonymous lane.
-			route, err = g.catalog.RouteForTier(model, override.Tier, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0)
+			route, err = g.catalog.RouteForTier(model, override.Tier, g.hasZenKeys(), g.hasGoKeys())
 		}
 		if err != nil {
 			wire.WriteError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
@@ -377,7 +385,7 @@ func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, "the model uses an upstream protocol that opencode2api does not expose", "invalid_request_error", "model")
 		return
 	}
-	route, err := g.catalog.Route(model, len(g.cfg.ZenKeys) > 0, len(g.cfg.GoKeys) > 0, g.cfg.Anonymous)
+	route, err := g.catalog.Route(model, g.hasZenKeys(), g.hasGoKeys(), g.cfg.Anonymous)
 	if err != nil {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
 		return

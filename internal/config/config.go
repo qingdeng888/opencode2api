@@ -217,8 +217,11 @@ func Normalize(path string, cfg Config) (Config, error) {
 	if cfg.FirstEnabledServerKey() == "" {
 		return Config{}, errors.New("至少保留一个启用的 API Key")
 	}
-	if !cfg.Anonymous && len(cfg.ZenKeys) == 0 && len(cfg.GoKeys) == 0 {
-		return Config{}, errors.New("zen_keys or go_keys must contain at least one upstream key unless anonymous is enabled")
+	// Only enabled keys build the runtime pools, so the guard counts enabled
+	// keys: disabling the last one while anonymous is off would leave every
+	// authenticated request without an upstream credential.
+	if !cfg.Anonymous && len(cfg.EnabledZenKeys()) == 0 && len(cfg.EnabledGoKeys()) == 0 {
+		return Config{}, errors.New("至少启用一个 Zen / Go 上游 Key，或开启匿名通道")
 	}
 	if cfg.Retry.MaxAttempts < 1 {
 		return Config{}, errors.New("retry.max_attempts must be at least 1")

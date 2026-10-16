@@ -2,6 +2,17 @@
 
 本文说明新增管理页面的使用方式、配置和错误处理。
 
+## 上游 Key 的启停
+
+管理页面：`/#upstream-keys`。与「代理管理」一致，支持单个停用 / 启用（行内按钮）、勾选、全选 / 取消全选，以及「启用选中」「停用选中」批量操作。
+
+- 停用的 Key 保留在 `zen_keys` / `go_keys` 里，备注、代理绑定模式与顺序都不丢；只有删除才会移除。
+- 停用即时热生效：该 Key 从上游池剔除，不再轮询。`/api/monitor` 的 `resources.keys` 只列出池内节点，`/api/debug/models` 的 `keys` 只列出可用 Key，Go 额度查询也只针对已启用的 Go Key。
+- 某个 Tier 的 Key 全部停用后，该 Tier 在模型可用性判断中视为不可用（诊断里的 `available_zen` / `available_go` 会变化），请求转向其他 Tier 或匿名通道。
+- 状态存在 `upstream_key_metadata[指纹].disabled`，与 `server_key_metadata` 的做法一致；管理接口 `POST /api/upstream-keys/enabled` 接受 `{"ids":[...],"enabled":true|false}`，返回 `changed` / `skipped`（未知 id 会出现在 `skipped`）。
+- 保护规则：关闭匿名通道时必须至少保留一个启用的上游 Key，否则 `Normalize` 拒绝保存并返回「至少启用一个 Zen / Go 上游 Key，或开启匿名通道」。开启匿名通道时允许全部停用。
+- 列表按 Key 指纹（`id`）而不是下标对齐实时状态：停用会让池内下标压缩，按下标查找会把一个 Key 的冷却状态错误地显示到另一行。
+
 ## 会话隔离
 
 管理页面：`配置中心 → 会话隔离`，读取 `GET /api/monitor` 的 `sessions` 字段。

@@ -223,6 +223,17 @@ When only anonymous access is configured, `/v1/models` exposes only models eligi
 
 Free models never need a Zen key: with `anonymous: true` they are served by the public lane, and a configured key is only their fallback. To keep keys but expose free models only, set `models.free_only: true`. Paid models then disappear from `/v1/models`, direct requests for them are rejected, and rotation aliases keep only free members; free models may still fall back to the configured keys.
 
+### Enabling and disabling upstream keys
+
+The "upstream keys" page can disable a single Zen/Go key (row button) or a selection in bulk:
+
+- A disabled key **stays in the `zen_keys` / `go_keys` array**, so its note, proxy binding, and position survive; only deletion removes it.
+- Disabling takes the key out of the runtime pools immediately: it no longer participates in rotation, disappears from the Playground key list, and is skipped by quota lookups (the Go quota page only queries enabled keys). The enabled keys alone decide whether a tier counts as available, so disabling every key of a tier makes that tier unavailable in model diagnostics and requests fall through to another tier or the anonymous lane.
+- The flag lives in `upstream_key_metadata.disabled`, keyed by key fingerprint, mirroring `server_key_metadata`.
+- Guard rail: with the anonymous lane off, at least one upstream key must stay enabled; the save is rejected otherwise. With it on, disabling every key is allowed and requests are served anonymously.
+
+Disabling or deleting never fails an in-flight request; both only affect how new requests are routed.
+
 ### Free model availability
 
 The gateway probes models whose IDs contain `free` (case-insensitive), or whose metadata reports zero input/output cost without deprecation, with a short request using its native protocol. It tries the enabled anonymous lane first and then one configured Zen Key. A valid completed response on either lane keeps the model enabled; the model is disabled in discovery and routing only when every attempted lane explicitly reports that the model does not exist or has been retired. Authentication errors, rate limits, timeouts, transport errors, 5xx responses, and malformed replies are inconclusive: they do not create a new disable, and are checked again in one hour. Probe traffic does not alter production key/proxy cooldowns or request statistics. It still reaches the upstream and may consume its free allowance.
@@ -271,7 +282,8 @@ See [config.example.json](config.example.json) for a complete starting configura
 | --------------------------- | --------------------------------------------------------------------------- |
 | `listen`                    | `127.0.0.1:8080`.                                                           |
 | `server_keys`               | At least one local key is required.                                         |
-| `zen_keys`, `go_keys`       | At least one upstream key is required unless anonymous access is enabled.   |
+| `zen_keys`, `go_keys`       | At least one upstream key must be *enabled* unless anonymous access is on.  |
+| `upstream_key_metadata`     | Per-key note, enabled flag, and proxy binding, keyed by fingerprint; a disabled key stays in the array but is excluded from routing. |
 | `anonymous`                 | `false`.                                                                    |
 | `prefer`                    | `go`; accepts `go` or `zen`.                                                |
 | `upstream.zen`              | `https://opencode.ai/inference/openai`.                                                  |
