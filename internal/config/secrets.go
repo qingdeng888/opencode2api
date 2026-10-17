@@ -18,11 +18,18 @@ func MaskValue(value string) string {
 }
 
 func RedactURL(raw string) string {
+	clean, pool := ParseProxyEntry(raw)
+	if clean != "" {
+		raw = clean
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "<invalid>"
 	}
 	if u.User == nil {
+		if pool && u.Fragment == "" {
+			u.Fragment = "pool"
+		}
 		return u.String()
 	}
 	// Mask the userinfo without url.String's percent-encoding: encoding "***"
@@ -30,9 +37,16 @@ func RedactURL(raw string) string {
 	u.User = nil
 	masked := u.String()
 	if i := strings.Index(masked, "://"); i >= 0 {
-		return masked[:i+3] + "***@" + masked[i+3:]
+		masked = masked[:i+3] + "***@" + masked[i+3:]
+	} else {
+		masked = "***@" + masked
 	}
-	return "***@" + masked
+	// Keep the rotating-pool marker visible so a redacted entry still says it
+	// rotates instead of looking like a plain proxy.
+	if pool && !strings.HasSuffix(masked, "#pool") {
+		masked += "#pool"
+	}
+	return masked
 }
 
 type SecretRedactor struct {
@@ -63,8 +77,9 @@ func (r *SecretRedactor) Replace(cfg Config) {
 	}
 	for _, value := range cfg.RuntimeProxies() {
 		if value != "direct" {
-			values = append(values, value)
-			if parsed, err := url.Parse(value); err == nil && parsed.User != nil {
+			clean, _ := ParseProxyEntry(value)
+			values = append(values, value, clean)
+			if parsed, err := url.Parse(clean); err == nil && parsed.User != nil {
 				values = append(values, parsed.User.Username())
 				if password, ok := parsed.User.Password(); ok {
 					values = append(values, password)
