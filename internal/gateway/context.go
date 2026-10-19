@@ -11,13 +11,14 @@ import (
 	"opencode2api/internal/config"
 )
 
-// The upstream free tier bans the calling IP when a single request carries more
-// than 200k tokens of context, before the model ever runs. The gateway therefore
-// keeps every request below models.context_limit (198k by default) and
-// advertises that same ceiling, so a well-behaved client never builds a history
-// large enough to trigger the ban. The check is deliberately conservative: the
-// estimate rounds up, and the tool schemas the gateway injects for the upstream
-// gates are budgeted as well.
+// The upstream bans the calling IP once a conversation's context — the model's
+// context window — grows past 200k tokens, before the model ever runs. The
+// gateway therefore advertises models.context_limit (160k by default) as every
+// model's window, so a well-behaved client compacts its history against that
+// figure, and additionally refuses a request that still exceeds it. This file
+// implements the second half; the advertised window lives in the model catalog
+// and /v1/models. The estimate is deliberately conservative: it rounds up, and
+// the tool schemas the gateway injects for the upstream gates are budgeted too.
 //
 // An image is charged a flat estimate rather than the size of its base64
 // payload: base64 says nothing about the picture's token cost, and counting it
@@ -43,7 +44,7 @@ type contextUsage struct {
 	// Output is the completion budget the request asks for, or 0 when the
 	// upstream default applies.
 	Output int
-	// Limit is the ceiling that produced this estimate.
+	// Limit is the model context window that produced this estimate.
 	Limit int
 }
 
@@ -51,7 +52,7 @@ type contextUsage struct {
 // requested completion budget.
 func (u contextUsage) Total() int { return u.Prompt + u.Output }
 
-// overLimit reports whether the request would exceed the context ceiling.
+// overLimit reports whether the request would exceed the context window.
 func (u contextUsage) overLimit() bool { return u.Limit > 0 && u.Total() > u.Limit }
 
 // estimateJSONTokens approximates the token count of a decoded JSON value.
@@ -108,7 +109,7 @@ func estimateTextTokens(text string) int {
 
 // injectionReserveTokens is the token cost of the tool definitions the gateway
 // adds for the upstream free-tier gates. A request whose own prompt already
-// fills the ceiling would otherwise still reach the upstream over the limit
+// fills the window would otherwise still reach the upstream over the limit
 // after injection, so the reserve is subtracted from every budget.
 var (
 	injectionReserveOnce   sync.Once
@@ -146,7 +147,7 @@ func injectedToolReserve() int {
 	return injectionReserveTokens
 }
 
-// contextLimit returns the effective context ceiling for this gateway. Config
+// contextLimit returns the effective context window for this gateway. Config
 // validation has already replaced zero with the default.
 func (g *Gateway) contextLimit() int {
 	limit := g.cfg.Models.ContextLimit
@@ -157,7 +158,7 @@ func (g *Gateway) contextLimit() int {
 }
 
 // estimateContext measures one prepared upstream body against the context
-// ceiling. The reserve for injected tool schemas is included in Prompt, so the
+// window. The reserve for injected tool schemas is included in Prompt, so the
 // comparison covers what the upstream will actually receive.
 func (g *Gateway) estimateContext(payload map[string]any) contextUsage {
 	usage := contextUsage{Limit: g.contextLimit()}
@@ -173,7 +174,7 @@ func (g *Gateway) estimateContext(payload map[string]any) contextUsage {
 		prompt += len(tools) * toolTokenOverhead
 	}
 	// Tool schemas the gateway injects for the free-tier gates are not in the
-	// body yet; budget them so a request that fills the ceiling on its own
+	// body yet; budget them so a request that fills the window on its own
 	// cannot overshoot once they are added.
 	prompt += injectedToolReserve()
 	usage.Prompt = prompt
@@ -212,7 +213,7 @@ func numberAt(value any) (int, bool) {
 }
 
 // clampCompletionBudget lowers the completion budget so the prompt plus the
-// reply still fits the ceiling, and returns whether it changed anything. A
+// reply still fits the window, and returns whether it changed anything. A
 // request whose prompt alone leaves no usable room is left untouched so the
 // caller can reject it with a clear message instead of silently shrinking the
 // answer to nothing.
@@ -234,7 +235,7 @@ func clampCompletionBudget(payload map[string]any, usage contextUsage) bool {
 }
 
 // contextLimitError reports a request that cannot be served without exceeding
-// the context ceiling even after shrinking the completion budget. It is a
+// the model context window even after shrinking the completion budget. It is a
 // client error, not an upstream one: the gateway refuses the request instead of
 // letting the upstream ban the IP.
 type contextLimitError struct {
@@ -244,13 +245,13 @@ type contextLimitError struct {
 
 func (e *contextLimitError) Error() string {
 	return fmt.Sprintf(
-		"request exceeds the %d token context limit: the prompt is about %d tokens and a reply needs at least %d more; shorten the conversation, or raise models.context_limit if the upstream accepts it",
-		e.usage.Limit, e.usage.Prompt, minOutputTokens)
+		"%s has a %d token context window and this conversation is about %d tokens, leaving no room for a reply (at least %d tokens are needed); compact or trim the conversation, or raise models.context_limit if the upstream accepts it",
+		e.model, e.usage.Limit, e.usage.Prompt, minOutputTokens)
 }
 
-// enforceContext applies the context ceiling to one prepared upstream body. It
+// enforceContext applies the model context window to one prepared upstream body. It
 // lowers an oversized completion budget so prompt and reply fit together, and
-// rejects a request whose prompt alone already fills the ceiling. The body is
+// rejects a request whose prompt alone already fills the window. The body is
 // modified in place when trimming succeeds.
 func (g *Gateway) enforceContext(model string, payload map[string]any) error {
 	usage := g.estimateContext(payload)

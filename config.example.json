@@ -25,7 +25,7 @@
     "refresh_seconds": 300,
     "protocols": {},
     "free_only": false,
-    "context_limit": 198000
+    "context_limit": 160000
   },
   "session": {
     "ttl_seconds": 900

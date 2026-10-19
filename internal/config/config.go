@@ -103,12 +103,13 @@ type RetryConfig struct {
 	TimeoutSeconds int `json:"timeout_seconds"`
 }
 
-// DefaultContextLimit is the context ceiling applied to every model unless
+// DefaultContextLimit is the context window declared for every model unless
 // models.context_limit says otherwise. The upstream free tier bans the calling
-// IP when a request carries more than 200k tokens of context, so the ceiling is
-// kept slightly below that: 198k of prompt plus the tool schemas the gateway
-// injects stays under the ban threshold.
-const DefaultContextLimit = 198_000
+// IP once a conversation's context grows past 200k tokens, so the window is
+// kept comfortably below that. The cap applies to the model's own context
+// window (what the client budgets its whole conversation against), not just to
+// one request, so a long agent session is trimmed before it can reach the ban.
+const DefaultContextLimit = 160_000
 
 // ModelsConfig controls model discovery and routing. RefreshSeconds is the
 // catalog refresh interval, and Protocols maps a model ID to the wire protocol
@@ -119,11 +120,13 @@ type ModelsConfig struct {
 	// FreeOnly limits discovery and routing to free models, even when Zen or
 	// Go keys could serve paid ones. Free models may still fall back to keys.
 	FreeOnly bool `json:"free_only"`
-	// ContextLimit is the hard context ceiling in tokens for every model. The
-	// advertised context window is clamped to it and a request that would
-	// exceed it is rejected locally, so the upstream never sees a prompt large
-	// enough to trigger its IP ban. Zero means DefaultContextLimit; a value
-	// large enough to exceed every model's own window effectively disables it.
+	// ContextLimit is the context window declared for every model, in tokens.
+	// It is the model's own conversation budget, not a per-request cap: the
+	// advertised context_window is clamped to it, so a client trims or compacts
+	// its history against this figure instead of the upstream's larger one.
+	// Requests that still exceed it are rejected locally, which keeps the
+	// upstream from ever seeing the 200k that bans the IP. Zero means
+	// DefaultContextLimit; the accepted range is 4000-8000000.
 	ContextLimit int `json:"context_limit"`
 }
 

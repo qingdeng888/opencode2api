@@ -223,16 +223,16 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 免费模型不需要 Zen Key：启用 `anonymous: true` 后由匿名通道提供，已配置的 Key 只作为回退。如果想保留 Key 但只暴露免费模型，设置 `models.free_only: true`：付费模型不再出现在 `/v1/models`，直接请求会被拒绝，轮转别名只保留免费成员；免费模型仍可回退到已配置的 Key。
 
-### 上下文上限（防止上游封禁 IP）
+### 模型上下文窗口（防止上游封禁 IP）
 
-OpenCode 上游检测到单个请求的上下文超过 **200k tokens** 时会直接封禁调用方的出口 IP，而这一步发生在模型运行之前。网关因此把所有模型的上限统一压到 `models.context_limit`，默认 **198000**：
+上游封禁的依据是**整段对话的上下文**（模型窗口）超过 200k tokens，而不是单次请求的某个字段。所以网关不从"拦请求"入手，而是把所有模型对外声明的**上下文窗口**统一压到 `models.context_limit`，默认 **160000**：
 
-- **声明**：`/v1/models` 里每个模型的 `context_window` / `context_length` / `max_input` 都按该上限截断，轮转别名也一样。模型自身窗口更小的（例如 128k）保留更小的值，只会往下压，不会往上抬。
-- **本地拒绝**：估算 prompt（含网关为免费通道注入的工具定义）加上请求的回复预算，超过上限时网关直接返回 `413` + `context_length_exceeded`，请求不会发到上游。三个协议（`/v1/chat/completions`、`/v1/responses`、`/v1/messages`）、轮转别名和诊断页走同一处校验。
-- **自动压缩回复预算**：prompt 本身没超、但「prompt + max_tokens」超了时，网关把回复预算降到剩余空间，而不是拒绝整个请求。
-- **估算方式偏保守**：ASCII 约 4 字符/token，CJK 等宽字符按 1 字符/token；图片按固定 1600 token 计，不按 base64 长度计（否则普通截图会被误判）。
+- **声明（关键）**：`/v1/models` 里每个模型的 `context_window`、`context_length`、`max_input` 以及 `metadata` 里的同名/`max_input` 字段全部按该上限输出，轮转别名同样。客户端（OpenCode、Claude Code、Cline 等）据此规划自己的历史预算并在接近窗口时自动压缩对话——这才是真正控制"模型上下文"的地方。模型自身窗口更小的（例如 128k）保留更小的值：只会往下压，不会往上抬。
+- **兜底拒绝**：如果客户端不理会上限、仍把超长历史发上来，网关估算"prompt（含免费通道注入的工具定义，实测预留约 2.7k）+ 回复预算"，超过窗口即本机返回 `413` + `context_length_exceeded`，请求不会发往上游。三个协议（`/v1/chat/completions`、`/v1/responses`、`/v1/messages`）、轮转别名与诊断页共用 `prepareRouteBodies` 这一处校验。
+- **压缩回复预算**：prompt 未超但「prompt + max_tokens」超了时，只把回复预算降到剩余空间，请求继续，不整单拒绝。
+- **估算偏保守**：ASCII 约 4 字符/token，CJK 等宽字符按 1 字符/token；图片按固定 1600 token 计，不按 base64 长度计（否则普通截图会被误判）。
 
-改大该值会让上游重新暴露在封禁风险里，请只在上游确实接受时调整。设为 `0` 表示使用默认 198000；合法范围 4000–8000000。修改后热生效，无需重启。
+把窗口调大等于把上限还给客户端，上游会重新暴露在封禁风险里，请只在上游确实接受时调整。设为 `0` 表示使用默认 160000；合法范围 4000–8000000。修改后热生效，无需重启。
 
 ### 上游 Key 的启停
 
@@ -305,7 +305,7 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `models.refresh_seconds`    | `300`；最小为 1。                                                                     |
 | `models.protocols`          | `{}`；按模型 ID 覆盖原生协议。                                                        |
 | `models.free_only`          | `false`；即使配置了 Zen / Go Key，也只暴露和路由免费模型。                            |
-| `models.context_limit`      | `198000`；所有模型的上下文硬上限。声明值按它截断，超限请求本地返回 413，避免上游按 200k 阈值封禁 IP。 |
+| `models.context_limit`      | `160000`；所有模型的上下文硬上限。声明值按它截断，超限请求本地返回 413，避免上游按 200k 阈值封禁 IP。 |
 | `session.ttl_seconds`       | `900`（15 分钟）；范围为 60–86400。下游会话到上游会话的映射空闲窗口，见「会话隔离」。 |
 | `reasoning.effort`          | 空（关闭）；可选 `auto`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`none`。 |
 | `reasoning.effort_by_model` | `{}`；按模型 ID 覆盖 `reasoning.effort`。                                             |

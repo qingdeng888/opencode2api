@@ -158,10 +158,12 @@ func (c *ModelCatalog) SetRefreshInterval(interval time.Duration) {
 	c.mu.Unlock()
 }
 
-// SetContextLimit caps the context window advertised for every model. The
-// gateway rejects requests above that ceiling, so a listing that advertised the
-// upstream's larger window would invite clients to build a history the gateway
-// refuses to forward. Zero leaves the upstream figures untouched.
+// SetContextLimit sets the context window every model advertises. This is the
+// primary control over the model's conversation budget: clients read it and
+// compact their history before it grows past the window, which is what keeps a
+// long agent session from ever reaching the upstream's 200k IP-ban threshold.
+// The gateway also refuses a request that still exceeds it. Zero leaves the
+// upstream figures untouched.
 func (c *ModelCatalog) SetContextLimit(limit int) {
 	c.mu.Lock()
 	c.contextLimit = limit
@@ -606,8 +608,9 @@ func (c *ModelCatalog) MetadataForTier(model string, tier config.Tier) Metadata 
 			}
 		}
 	}
-	// Advertise the ceiling the gateway enforces: a client that reads the
-	// upstream's larger window would build a history the gateway then refuses.
+	// Advertise the window the gateway enforces. A client that read the
+	// upstream's larger figure would grow a history the gateway then refuses,
+	// so every model reports the same budget the request check uses.
 	if limit > 0 {
 		if md.ContextWindow == 0 || md.ContextWindow > limit {
 			md.ContextWindow = limit

@@ -54,7 +54,7 @@ func TestEstimateJSONTokensChargesImagesOnce(t *testing.T) {
 }
 
 func TestEnforceContextRejectsOversizedPrompt(t *testing.T) {
-	g := newContextGateway(198_000)
+	g := newContextGateway(160_000)
 	// 1,000,000 ASCII characters is roughly 250k tokens before the reserve.
 	payload := map[string]any{
 		"model":  "test-model",
@@ -66,19 +66,19 @@ func TestEnforceContextRejectsOversizedPrompt(t *testing.T) {
 	}
 	err := g.enforceContext("test-model", payload)
 	if err == nil {
-		t.Fatal("a 250k-token prompt was accepted under a 198k ceiling")
+		t.Fatal("a 250k-token prompt was accepted under a 160k window")
 	}
 	var overLimit *contextLimitError
 	if !errors.As(err, &overLimit) {
 		t.Fatalf("error is %T, want *contextLimitError", err)
 	}
-	if !strings.Contains(err.Error(), "198000") {
-		t.Errorf("error %q does not name the limit", err)
+	if !strings.Contains(err.Error(), "160000") || !strings.Contains(err.Error(), "test-model") {
+		t.Errorf("error %q does not name the model and the window", err)
 	}
 }
 
 func TestEnforceContextAcceptsPromptUnderLimit(t *testing.T) {
-	g := newContextGateway(198_000)
+	g := newContextGateway(160_000)
 	payload := map[string]any{
 		"model":      "test-model",
 		"max_tokens": float64(4096),
@@ -98,7 +98,7 @@ func TestEnforceContextAcceptsPromptUnderLimit(t *testing.T) {
 func TestEnforceContextShrinksOversizedCompletionBudget(t *testing.T) {
 	g := newContextGateway(10_000)
 	// A small prompt with an enormous completion budget would still exceed the
-	// ceiling: prompt + reply is what the upstream measures.
+	// window: prompt + reply is what the upstream measures.
 	payload := map[string]any{
 		"model":      "test-model",
 		"max_tokens": float64(1_000_000),
@@ -118,7 +118,7 @@ func TestEnforceContextShrinksOversizedCompletionBudget(t *testing.T) {
 }
 
 func TestEnforceContextLeavesSmallBudgetAlone(t *testing.T) {
-	g := newContextGateway(198_000)
+	g := newContextGateway(160_000)
 	payload := map[string]any{
 		"model":                 "test-model",
 		"max_output_tokens":     float64(64),
@@ -144,7 +144,7 @@ func TestEnforceContextDisabledByZeroLimit(t *testing.T) {
 		"messages": []any{map[string]any{"role": "user", "content": strings.Repeat("a", 4_000_000)}},
 	}
 	if err := g.enforceContext("m", payload); err == nil {
-		t.Error("a 1M-token prompt was accepted by the default ceiling")
+		t.Error("a 1M-token prompt was accepted by the default window")
 	}
 }
 
@@ -181,7 +181,7 @@ func TestInjectedToolReserveIsNonTrivial(t *testing.T) {
 }
 
 func TestEstimateContextIncludesInjectedReserve(t *testing.T) {
-	g := newContextGateway(198_000)
+	g := newContextGateway(160_000)
 	payload := map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}
 	usage := g.estimateContext(payload)
 	if usage.Prompt < injectedToolReserve() {
@@ -190,7 +190,7 @@ func TestEstimateContextIncludesInjectedReserve(t *testing.T) {
 }
 
 // prepareRouteBodies is the single funnel every inference path (direct,
-// fallback tier, rotation alias, diagnostic) goes through, so the ceiling must
+// fallback tier, rotation alias, diagnostic) goes through, so the window must
 // be enforced there rather than at one endpoint.
 func TestPrepareRouteBodiesRejectsOverLimitPayload(t *testing.T) {
 	g := &Gateway{cfg: config.Config{
@@ -218,7 +218,7 @@ func TestPrepareRouteBodiesRejectsOverLimitPayload(t *testing.T) {
 
 func TestPrepareRouteBodiesKeepsNormalPayload(t *testing.T) {
 	g := &Gateway{cfg: config.Config{
-		Models: config.ModelsConfig{ContextLimit: 198_000},
+		Models: config.ModelsConfig{ContextLimit: 160_000},
 		Upstream: config.UpstreamConfig{
 			Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go",
 			Anonymous: "https://opencode.ai/inference",

@@ -601,10 +601,12 @@
                 <div class="field">
                   <label>上下文上限（tokens）</label><input id="c-context-limit" type="number" min="4000" />
                   <div class="hint">
-                    所有模型统一限制为该值，默认 198000。<code>/v1/models</code> 会把
-                    <code>context_window</code> 声明为这个上限；超过上限的请求在网关本地直接返回
-                    413（<code>context_length_exceeded</code>），不会发到上游。上游一旦收到超过 200k
-                    上下文的请求就会封禁出口 IP，所以默认值刻意留出余量（模型自身窗口更小的仍按更小值）。
+                    这是所有模型对外的<b>上下文窗口</b>，默认 160000。<code>/v1/models</code> 的
+                    <code>context_window</code> / <code>context_length</code> 与 <code>metadata</code>
+                    都按它声明，客户端因此按 160k 规划并压缩自己的对话历史；模型自身窗口更小的仍保留更小值。
+                    万一客户端不理会上限、把更长的历史发上来，网关在本机直接返回 413
+                    （<code>context_length_exceeded</code>），请求不会发到上游——上游一旦看到超过 200k
+                    的上下文就会封禁出口 IP。
                   </div>
                 </div>
               </div>

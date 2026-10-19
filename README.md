@@ -223,33 +223,39 @@ When only anonymous access is configured, `/v1/models` exposes only models eligi
 
 Free models never need a Zen key: with `anonymous: true` they are served by the public lane, and a configured key is only their fallback. To keep keys but expose free models only, set `models.free_only: true`. Paid models then disappear from `/v1/models`, direct requests for them are rejected, and rotation aliases keep only free members; free models may still fall back to the configured keys.
 
-### Context ceiling (protecting the egress IP from a ban)
+### Model context window (protecting the egress IP from a ban)
 
-The upstream bans the calling IP when a single request carries more than **200k
-tokens** of context, and it does so before the model runs. The gateway therefore
-caps every model at `models.context_limit`, **198000** by default:
+The upstream bans on the **conversation's context** — the model's context
+window — growing past 200k tokens, not on any single request field. So the
+gateway does not just police requests: it lowers the **context window every
+model advertises** to `models.context_limit`, **160000** by default.
 
-- **Advertised**: `/v1/models` reports that ceiling in each entry's
-  `context_window` / `context_length` / `max_input`, rotation aliases included.
-  A model whose own window is smaller (128k, say) keeps its smaller value: the
-  ceiling only lowers figures, never raises them.
-- **Rejected locally**: when the estimated prompt (including the tool schemas
-  the gateway injects for the free-tier gates) plus the requested reply budget
-  exceeds the ceiling, the gateway answers `413` with
-  `context_length_exceeded` and never contacts the upstream. All three
-  protocols (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`), rotation
-  aliases, and the diagnostics page share that one check.
+- **Advertised (the part that matters)**: each `/v1/models` entry reports that
+  figure in `context_window`, `context_length`, `max_input`, and the same
+  fields inside `metadata`; rotation aliases report it too. Clients (OpenCode,
+  Claude Code, Cline, …) budget their history against that number and compact
+  the conversation before it grows past it — that is what actually bounds the
+  model's context. A model whose own window is smaller (128k, say) keeps its
+  smaller value: the cap only lowers figures, never raises them.
+- **Backstop**: if a client ignores the advertised window and sends a longer
+  history anyway, the gateway estimates prompt (including the ~2.7k tokens of
+  tool schemas it injects for the free-tier gates) plus the reply budget and,
+  when that exceeds the window, answers `413` with `context_length_exceeded`
+  without contacting the upstream. All three protocols
+  (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`), rotation aliases,
+  and the diagnostics page share that one check in `prepareRouteBodies`.
 - **Reply budget trimmed**: if the prompt fits but prompt + `max_tokens` does
-  not, the completion budget is lowered to the remaining space instead of
-  failing the request.
+  not, the completion budget is lowered to the remaining space and the request
+  still runs.
 - **Conservative estimate**: ASCII is about four characters per token and CJK
   costs roughly one token per character. An image costs a flat 1600 tokens
   rather than its base64 length, which would otherwise reject ordinary
   screenshots.
 
-Raising the value re-exposes the IP to the upstream ban; only do it if the
-upstream accepts it. `0` means the 198000 default, and the accepted range is
-4000–8000000. Changes apply on save, without a restart.
+Raising the window hands the budget back to clients and re-exposes the IP to
+the upstream ban; only do it if the upstream accepts it. `0` means the 160000
+default, and the accepted range is 4000–8000000. Changes apply on save, without
+a restart.
 
 ### Enabling and disabling upstream keys
 
@@ -322,7 +328,7 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `models.refresh_seconds`    | `300`; minimum 1.                                                           |
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
 | `models.free_only`          | `false`; expose and route only free models, even with Zen or Go keys.       |
-| `models.context_limit`      | `198000`; hard context ceiling for every model. Advertised values are clamped to it and oversized requests are rejected locally with 413, so the upstream never sees the 200k that bans the IP. |
+| `models.context_limit`      | `160000`; the context window declared for every model. Advertised `context_window`/`context_length`/`max_input` are clamped to it so clients compact against it, and a longer request is still rejected locally with 413 before the upstream sees the 200k that bans the IP. |
 | `session.ttl_seconds`       | `900` (15 min); range 60–86400. Idle window of the downstream→upstream session map, see "Session isolation". |
 | `reasoning.effort`          | Empty (off); `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `none`. |
 | `reasoning.effort_by_model` | `{}`; per-model overrides of `reasoning.effort`.                            |

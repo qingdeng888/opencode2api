@@ -13,16 +13,19 @@
 - 保护规则：关闭匿名通道时必须至少保留一个启用的上游 Key，否则 `Normalize` 拒绝保存并返回「至少启用一个 Zen / Go 上游 Key，或开启匿名通道」。开启匿名通道时允许全部停用。
 - 列表按 Key 指纹（`id`）而不是下标对齐实时状态：停用会让池内下标压缩，按下标查找会把一个 Key 的冷却状态错误地显示到另一行。
 
-## 上下文上限与 IP 保护
+## 模型上下文窗口与 IP 保护
 
-配置项：`配置中心 → 上游与协议路由 → 上下文上限（tokens）`（`models.context_limit`，默认 `198000`）。
+配置项：`配置中心 → 上游与协议路由 → 上下文上限（tokens）`（`models.context_limit`，默认 `160000`）。
 
-OpenCode 上游在请求上下文超过 200k tokens 时会直接封禁出口 IP，且早于模型运行。网关为此统一压上限：
+上游封禁的依据是整段对话的上下文（模型窗口）超过 200k tokens，所以这里的机制分两层：
 
-- `/v1/models` 每个模型的 `context_window` / `context_length` / `max_input` 都被截断到该值（轮转别名同样），模型自身窗口更小的保留更小值。
-- 估算「prompt（含免费通道注入的工具定义，实测约 2.7k token 预留）+ 回复预算」超限时，返回值 `413`、错误类型 `context_length_exceeded`，请求不会发往上游；`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、轮转别名与诊断页共用这条校验（都在 `prepareRouteBodies` 里）。
+1. **声明层（真正控制模型上下文的地方）**：`/v1/models` 里每个模型的 `context_window`、`context_length`、`max_input` 以及 `metadata` 里的对应字段都按 `models.context_limit` 输出，轮转别名同样。客户端据此规划历史并在接近窗口时压缩对话；模型自身窗口更小的保留更小值（只压不抬）。
+2. **兜底层**：客户端仍发来超长历史时，估算「prompt（含免费通道注入的工具定义，约 2.7k 预留）+ 回复预算」，超过窗口即本地返回 `413` / `context_length_exceeded`，不触达上游。该判定在 `prepareRouteBodies`，因此 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`、轮转别名、诊断页全都覆盖。
+
+细节：
+
 - prompt 未超但「prompt + max_tokens」超了时，只把回复预算降到剩余空间，请求继续。
-- 估算按 ASCII 4 字符/token、宽字符 1 字符/token，图片固定 1600 token，因此图片不会因 base64 长度被误拒。
+- 估算按 ASCII 4 字符/token、宽字符 1 字符/token；图片固定 1600 token（按 base64 长度计会把普通截图判成超限）。
 - 设为 `0` 用默认值；合法范围 4000–8000000；保存即热生效。
 
 ## 会话隔离

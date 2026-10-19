@@ -126,7 +126,7 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 				meta.UsageReported = false
 			}
 			result := g.rotationAttempt(ctx, w, r, external, payload, alias, route, ids, total)
-			// A request over the context ceiling is refused for every model in
+			// A request over the model context window is refused for every model in
 			// the group alike: walking the remaining models would just repeat
 			// the same rejection and pause them for no reason.
 			var overLimit *contextLimitError

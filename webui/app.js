@@ -153,7 +153,7 @@ function fillConfig(value) {
   $("#c-session-ttl").value = value.session?.ttl_seconds ?? 900;
   $("#c-protocols").value = JSON.stringify(value.models.protocols || {}, null, 2);
   $("#c-free-only").checked = !!value.models.free_only;
-  $("#c-context-limit").value = value.models.context_limit ?? 198000;
+  $("#c-context-limit").value = value.models.context_limit ?? 160000;
   const reasoning = value.reasoning || {};
   $("#c-reasoning-effort").value = reasoning.effort || "";
   $("#c-reasoning-by-model").value = JSON.stringify(reasoning.effort_by_model || {}, null, 2);
