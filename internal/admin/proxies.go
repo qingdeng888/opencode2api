@@ -398,7 +398,7 @@ func (a *Server) handleTestProxy(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusInternalServerError, "proxy_test_failed", "could not construct probe request")
 		return
 	}
-	req.Header.Set("User-Agent", httpx.UserAgent())
+	req.Header.Set("User-Agent", httpx.V2UserAgent())
 	resp, err := client.Do(req)
 	latency := time.Since(started)
 	if resp != nil {

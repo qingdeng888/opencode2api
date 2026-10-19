@@ -9,24 +9,24 @@ import (
 
 // newTestTransportPool builds a pool of N fake proxies without any network
 // dialing; only the identity/health of each entry matters for binding tests.
-func newTestTransportPool(t *testing.T, names ...string) *transportPool {
+func newTestTransportPool(t *testing.T, names ...string) *proxyTransports {
 	t.Helper()
 	perf := config.PerformanceConfig{
 		MaxIdleConns: 4, MaxIdleConnsPerHost: 4, MaxConnsPerHost: 0,
 		IdleConnTimeoutSeconds: 1, ConnectTimeoutSeconds: 1, FailureCooldownSeconds: 1,
 	}
-	pool, err := newTransportPool(names, perf, time.Second)
+	pool, err := transportPool(names, perf, time.Second)
 	if err != nil {
-		t.Fatalf("newTransportPool: %v", err)
+		t.Fatalf("transportPool: %v", err)
 	}
 	return pool
 }
 
 func TestNodePoolAutoBindingIsRoundRobin(t *testing.T) {
 	transports := newTestTransportPool(t, "direct", "http://a:1", "http://b:2")
-	pool, err := newNodePool([]string{"k1", "k2", "k3", "k4"}, transports, time.Second, nil)
+	pool, err := nodePool([]string{"k1", "k2", "k3", "k4"}, transports, time.Second, nil)
 	if err != nil {
-		t.Fatalf("newNodePool: %v", err)
+		t.Fatalf("nodePool: %v", err)
 	}
 	// auto mode must keep the historical i%N distribution
 	want := []int{0, 1, 2, 0}
@@ -47,9 +47,9 @@ func TestNodePoolBindPinsConfiguredProxy(t *testing.T) {
 	transports := newTestTransportPool(t, "direct", "http://a:1", "http://b:2")
 	pinnedID := config.Fingerprint("http://b:2")
 	binding := func(string) (string, string) { return config.ProxyModeBind, pinnedID }
-	pool, err := newNodePool([]string{"k1"}, transports, time.Second, binding)
+	pool, err := nodePool([]string{"k1"}, transports, time.Second, binding)
 	if err != nil {
-		t.Fatalf("newNodePool: %v", err)
+		t.Fatalf("nodePool: %v", err)
 	}
 	node := pool.nodes[0]
 	if node.proxyMode != config.ProxyModeBind {
@@ -73,9 +73,9 @@ func TestNodePoolBindPinsConfiguredProxy(t *testing.T) {
 func TestNodePoolBindFallsBackToAutoWhenProxyMissing(t *testing.T) {
 	transports := newTestTransportPool(t, "direct", "http://a:1")
 	binding := func(string) (string, string) { return config.ProxyModeBind, "deadbeef00" }
-	pool, err := newNodePool([]string{"k1"}, transports, time.Second, binding)
+	pool, err := nodePool([]string{"k1"}, transports, time.Second, binding)
 	if err != nil {
-		t.Fatalf("newNodePool: %v", err)
+		t.Fatalf("nodePool: %v", err)
 	}
 	node := pool.nodes[0]
 	if node.proxyMode != "" {
@@ -89,9 +89,9 @@ func TestNodePoolBindFallsBackToAutoWhenProxyMissing(t *testing.T) {
 func TestNodePoolRotatePicksDifferentProxiesPerCall(t *testing.T) {
 	transports := newTestTransportPool(t, "http://a:1", "http://b:2", "http://c:3")
 	binding := func(string) (string, string) { return config.ProxyModeRotate, "" }
-	pool, err := newNodePool([]string{"k1"}, transports, time.Second, binding)
+	pool, err := nodePool([]string{"k1"}, transports, time.Second, binding)
 	if err != nil {
-		t.Fatalf("newNodePool: %v", err)
+		t.Fatalf("nodePool: %v", err)
 	}
 	node := pool.nodes[0]
 	if node.proxyMode != config.ProxyModeRotate {
@@ -123,9 +123,9 @@ func TestNodePoolRotateSkipsUnhealthyProxies(t *testing.T) {
 	transports.items[0].healthy.Store(false)
 	transports.items[2].healthy.Store(false)
 	binding := func(string) (string, string) { return config.ProxyModeRotate, "" }
-	pool, err := newNodePool([]string{"k1"}, transports, time.Second, binding)
+	pool, err := nodePool([]string{"k1"}, transports, time.Second, binding)
 	if err != nil {
-		t.Fatalf("newNodePool: %v", err)
+		t.Fatalf("nodePool: %v", err)
 	}
 	node := pool.nodes[0]
 	for i := 0; i < 5; i++ {
@@ -137,9 +137,9 @@ func TestNodePoolRotateSkipsUnhealthyProxies(t *testing.T) {
 
 func TestNodePoolAutoStillRebindsOnProxyFailure(t *testing.T) {
 	transports := newTestTransportPool(t, "http://a:1", "http://b:2")
-	pool, err := newNodePool([]string{"k1", "k2"}, transports, time.Second, nil)
+	pool, err := nodePool([]string{"k1", "k2"}, transports, time.Second, nil)
 	if err != nil {
-		t.Fatalf("newNodePool: %v", err)
+		t.Fatalf("nodePool: %v", err)
 	}
 	// k1 rides proxy 0, k2 rides proxy 1.
 	if moved := pool.RebindProxy(0); moved != 1 {

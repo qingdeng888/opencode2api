@@ -20,7 +20,7 @@ func TestDisabledUpstreamKeysAreExcludedFromPools(t *testing.T) {
 			config.Fingerprint("go-a"):  {Disabled: true},
 		},
 	}
-	zen, err := newNodePool(cfg.EnabledZenKeys(), transports, time.Second, cfg.UpstreamKeyBinding)
+	zen, err := nodePool(cfg.EnabledZenKeys(), transports, time.Second, cfg.UpstreamKeyBinding)
 	if err != nil {
 		t.Fatalf("zen pool: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestDisabledUpstreamKeysAreExcludedFromPools(t *testing.T) {
 		seen[status.Fingerprint] = true
 	}
 
-	goPool, err := newNodePool(cfg.EnabledGoKeys(), transports, time.Second, cfg.UpstreamKeyBinding)
+	goPool, err := nodePool(cfg.EnabledGoKeys(), transports, time.Second, cfg.UpstreamKeyBinding)
 	if err != nil {
 		t.Fatalf("go pool: %v", err)
 	}
