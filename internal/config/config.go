@@ -103,6 +103,13 @@ type RetryConfig struct {
 	TimeoutSeconds int `json:"timeout_seconds"`
 }
 
+// DefaultContextLimit is the context ceiling applied to every model unless
+// models.context_limit says otherwise. The upstream free tier bans the calling
+// IP when a request carries more than 200k tokens of context, so the ceiling is
+// kept slightly below that: 198k of prompt plus the tool schemas the gateway
+// injects stays under the ban threshold.
+const DefaultContextLimit = 198_000
+
 // ModelsConfig controls model discovery and routing. RefreshSeconds is the
 // catalog refresh interval, and Protocols maps a model ID to the wire protocol
 // used upstream, overriding the one the catalog reports.
@@ -112,6 +119,12 @@ type ModelsConfig struct {
 	// FreeOnly limits discovery and routing to free models, even when Zen or
 	// Go keys could serve paid ones. Free models may still fall back to keys.
 	FreeOnly bool `json:"free_only"`
+	// ContextLimit is the hard context ceiling in tokens for every model. The
+	// advertised context window is clamped to it and a request that would
+	// exceed it is rejected locally, so the upstream never sees a prompt large
+	// enough to trigger its IP ban. Zero means DefaultContextLimit; a value
+	// large enough to exceed every model's own window effectively disables it.
+	ContextLimit int `json:"context_limit"`
 }
 
 // SessionConfig controls the downstream→upstream conversation mapping that
@@ -209,7 +222,7 @@ func Load(path string) (Config, error) {
 		Listen:      "127.0.0.1:8080",
 		Upstream:    UpstreamConfig{Zen: "https://opencode.ai/zen", Go: "https://opencode.ai/zen/go", Anonymous: "https://opencode.ai/inference"},
 		Retry:       RetryConfig{MaxAttempts: 3, TimeoutSeconds: 300},
-		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}},
+		Models:      ModelsConfig{RefreshSeconds: 300, Protocols: map[string]string{}, ContextLimit: DefaultContextLimit},
 		Session:     SessionConfig{TTLSeconds: 900},
 		Performance: PerformanceConfig{MaxIdleConns: 2048, MaxIdleConnsPerHost: 256, MaxConnsPerHost: 0, IdleConnTimeoutSeconds: 120, ConnectTimeoutSeconds: 5, FailureCooldownSeconds: 15},
 		Logging:     LoggingConfig{Level: "info", RingSize: 2000},
@@ -284,6 +297,14 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Models.RefreshSeconds < 1 {
 		return Config{}, errors.New("models.refresh_seconds must be at least 1")
+	}
+	if cfg.Models.ContextLimit == 0 {
+		cfg.Models.ContextLimit = DefaultContextLimit
+	}
+	// The ceiling has to leave room for a reply and the injected tool schemas;
+	// anything smaller than a few thousand tokens cannot carry a real request.
+	if cfg.Models.ContextLimit < 4_000 || cfg.Models.ContextLimit > 8_000_000 {
+		return Config{}, errors.New("models.context_limit must be between 4000 and 8000000")
 	}
 	if cfg.Session.TTLSeconds == 0 {
 		cfg.Session.TTLSeconds = 900

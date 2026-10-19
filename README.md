@@ -223,6 +223,34 @@ When only anonymous access is configured, `/v1/models` exposes only models eligi
 
 Free models never need a Zen key: with `anonymous: true` they are served by the public lane, and a configured key is only their fallback. To keep keys but expose free models only, set `models.free_only: true`. Paid models then disappear from `/v1/models`, direct requests for them are rejected, and rotation aliases keep only free members; free models may still fall back to the configured keys.
 
+### Context ceiling (protecting the egress IP from a ban)
+
+The upstream bans the calling IP when a single request carries more than **200k
+tokens** of context, and it does so before the model runs. The gateway therefore
+caps every model at `models.context_limit`, **198000** by default:
+
+- **Advertised**: `/v1/models` reports that ceiling in each entry's
+  `context_window` / `context_length` / `max_input`, rotation aliases included.
+  A model whose own window is smaller (128k, say) keeps its smaller value: the
+  ceiling only lowers figures, never raises them.
+- **Rejected locally**: when the estimated prompt (including the tool schemas
+  the gateway injects for the free-tier gates) plus the requested reply budget
+  exceeds the ceiling, the gateway answers `413` with
+  `context_length_exceeded` and never contacts the upstream. All three
+  protocols (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`), rotation
+  aliases, and the diagnostics page share that one check.
+- **Reply budget trimmed**: if the prompt fits but prompt + `max_tokens` does
+  not, the completion budget is lowered to the remaining space instead of
+  failing the request.
+- **Conservative estimate**: ASCII is about four characters per token and CJK
+  costs roughly one token per character. An image costs a flat 1600 tokens
+  rather than its base64 length, which would otherwise reject ordinary
+  screenshots.
+
+Raising the value re-exposes the IP to the upstream ban; only do it if the
+upstream accepts it. `0` means the 198000 default, and the accepted range is
+4000–8000000. Changes apply on save, without a restart.
+
 ### Enabling and disabling upstream keys
 
 The "upstream keys" page can disable a single Zen/Go key (row button) or a selection in bulk:
@@ -294,6 +322,7 @@ See [config.example.json](config.example.json) for a complete starting configura
 | `models.refresh_seconds`    | `300`; minimum 1.                                                           |
 | `models.protocols`          | `{}`; per-model native protocol overrides.                                  |
 | `models.free_only`          | `false`; expose and route only free models, even with Zen or Go keys.       |
+| `models.context_limit`      | `198000`; hard context ceiling for every model. Advertised values are clamped to it and oversized requests are rejected locally with 413, so the upstream never sees the 200k that bans the IP. |
 | `session.ttl_seconds`       | `900` (15 min); range 60–86400. Idle window of the downstream→upstream session map, see "Session isolation". |
 | `reasoning.effort`          | Empty (off); `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `none`. |
 | `reasoning.effort_by_model` | `{}`; per-model overrides of `reasoning.effort`.                            |

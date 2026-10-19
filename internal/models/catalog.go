@@ -80,6 +80,9 @@ type ModelCatalog struct {
 	stale           bool
 	refreshAfter    time.Duration
 	freeOnly        bool
+	// contextLimit caps the advertised context window so discovery never
+	// promises more room than the gateway will actually forward upstream.
+	contextLimit int
 }
 
 // CatalogSnapshot summarizes the catalog for health reporting. Exposed counts
@@ -152,6 +155,16 @@ func (c *ModelCatalog) SetCachePath(path string) {
 func (c *ModelCatalog) SetRefreshInterval(interval time.Duration) {
 	c.mu.Lock()
 	c.refreshAfter = interval
+	c.mu.Unlock()
+}
+
+// SetContextLimit caps the context window advertised for every model. The
+// gateway rejects requests above that ceiling, so a listing that advertised the
+// upstream's larger window would invite clients to build a history the gateway
+// refuses to forward. Zero leaves the upstream figures untouched.
+func (c *ModelCatalog) SetContextLimit(limit int) {
+	c.mu.Lock()
+	c.contextLimit = limit
 	c.mu.Unlock()
 }
 
@@ -572,28 +585,36 @@ func (c *ModelCatalog) MetadataForTier(model string, tier config.Tier) Metadata 
 	c.mu.RLock()
 	md := c.modelMeta[tier][model]
 	pricing := c.pricing
+	limit := c.contextLimit
 	c.mu.RUnlock()
-	if pricing == nil {
-		return md
+	if pricing != nil {
+		if price, ok := pricing.Price(model); ok {
+			// OpenCode's capability catalog is authoritative. Use the pricing
+			// metadata's limits only to fill fields it omitted so discovery
+			// clients still get per-model context and output limits.
+			if md.ContextWindow == 0 {
+				md.ContextWindow = price.ContextWindow
+			}
+			if md.MaxInput == 0 {
+				md.MaxInput = price.MaxInput
+			}
+			if md.MaxOutput == 0 {
+				md.MaxOutput = price.MaxOutput
+			}
+			if price.Input != nil || price.Output != nil {
+				md.Cost = &Cost{Input: price.Input, Output: price.Output, CacheRead: price.CacheRead, CacheWrite: price.CacheWrite}
+			}
+		}
 	}
-	price, ok := pricing.Price(model)
-	if !ok {
-		return md
-	}
-	// OpenCode's capability catalog is authoritative. Use the pricing
-	// metadata's limits only to fill fields it omitted so discovery clients
-	// still get per-model context and output limits.
-	if md.ContextWindow == 0 {
-		md.ContextWindow = price.ContextWindow
-	}
-	if md.MaxInput == 0 {
-		md.MaxInput = price.MaxInput
-	}
-	if md.MaxOutput == 0 {
-		md.MaxOutput = price.MaxOutput
-	}
-	if price.Input != nil || price.Output != nil {
-		md.Cost = &Cost{Input: price.Input, Output: price.Output, CacheRead: price.CacheRead, CacheWrite: price.CacheWrite}
+	// Advertise the ceiling the gateway enforces: a client that reads the
+	// upstream's larger window would build a history the gateway then refuses.
+	if limit > 0 {
+		if md.ContextWindow == 0 || md.ContextWindow > limit {
+			md.ContextWindow = limit
+		}
+		if md.MaxInput == 0 || md.MaxInput > limit {
+			md.MaxInput = limit
+		}
 	}
 	return md
 }

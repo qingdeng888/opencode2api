@@ -117,6 +117,8 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, ses
 	catalog := models.Catalog(cfg.Prefer, cfg.Models.Protocols)
 	catalog.SetRefreshInterval(time.Duration(cfg.Models.RefreshSeconds) * time.Second)
 	catalog.SetFreeOnly(cfg.Models.FreeOnly)
+	// Discovery must never advertise more context than the gateway forwards.
+	catalog.SetContextLimit(cfg.Models.ContextLimit)
 	return &Gateway{
 		cfg:            cfg,
 		rotation:       rotationManager,
@@ -320,6 +322,16 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		}
 		bodies, err := g.prepareRouteBodies(external, route, payload)
 		if err != nil {
+			// Exceeding the context ceiling is a client error with its own
+			// kind, so a client can tell it apart from a conversion failure.
+			var overLimit *contextLimitError
+			if errors.As(err, &overLimit) {
+				if meta != nil {
+					meta.Outcome = "context_limit"
+				}
+				wire.WriteError(w, external, http.StatusRequestEntityTooLarge, err.Error(), "context_length_exceeded", "")
+				return
+			}
 			wire.WriteError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "")
 			return
 		}
@@ -617,6 +629,12 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		}
 		if effort := g.resolvedEffort(jsonutil.StringAt(upstreamPayload, "model"), tier, protocol); effort != "" {
 			wire.ForcedEffort(protocol, upstreamPayload, effort)
+		}
+		// The context ceiling is a property of the request, not of the tier:
+		// every prepared body must fit, including the ones only a fallback
+		// would send, or a retry could reach the upstream over the limit.
+		if err := g.enforceContext(jsonutil.StringAt(upstreamPayload, "model"), upstreamPayload); err != nil {
+			return nil, err
 		}
 		encoded, err := json.Marshal(upstreamPayload)
 		if err != nil {

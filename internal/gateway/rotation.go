@@ -126,6 +126,17 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 				meta.UsageReported = false
 			}
 			result := g.rotationAttempt(ctx, w, r, external, payload, alias, route, ids, total)
+			// A request over the context ceiling is refused for every model in
+			// the group alike: walking the remaining models would just repeat
+			// the same rejection and pause them for no reason.
+			var overLimit *contextLimitError
+			if errors.As(result.err, &overLimit) {
+				if meta != nil {
+					meta.Outcome = "context_limit"
+				}
+				wire.WriteError(w, external, http.StatusRequestEntityTooLarge, result.err.Error(), "context_length_exceeded", ids.Request)
+				return
+			}
 			outcome := result.reason
 			if result.err == nil {
 				outcome = "success"

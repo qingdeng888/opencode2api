@@ -228,7 +228,17 @@ func (g *Gateway) handleModels(w http.ResponseWriter, _ *http.Request) {
 		if !available {
 			continue
 		}
-		data = append(data, map[string]any{"id": group.Alias, "object": "model", "created": now, "owned_by": "opencode-go-rotation"})
+		alias := map[string]any{"id": group.Alias, "object": "model", "created": now, "owned_by": "opencode-go-rotation"}
+		// A rotation alias is served by Go-tier models, but the context
+		// ceiling is the gateway's own, so advertise it here too instead of
+		// leaving the field absent (which clients read as "unknown, use the
+		// model's own window").
+		if limit := g.contextLimit(); limit > 0 {
+			alias["context_window"] = limit
+			alias["context_length"] = limit
+			alias["max_input"] = limit
+		}
+		data = append(data, alias)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 }
