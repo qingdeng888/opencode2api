@@ -1,6 +1,6 @@
 # opencode2api
 
-[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md)
+[English](README.md) | [简体中文](README.zh-CN.md) | [Tiếng Việt](README.vi.md) | [Italiano](README.it.md)
 
 使用 Go 编写的 **OpenCode Zen / Zen Go API 网关**。对外提供 Chat Completions、Responses 和 Anthropic Messages 接口，按上游原生协议转换请求，并统一管理上游 Key 与代理。
 
@@ -12,6 +12,7 @@ WebUI 内嵌在可执行文件中，运行服务无需 Node.js 或数据库。
 - 文本、图片、reasoning、函数工具、工具调用和工具结果；目标协议允许时支持文件内容转换。
 - 独立的 Zen / Go Key 池，可配置优先级、重试和会话亲和性。
 - 使用 OpenCode `public` 凭证的可选 Zen 匿名通道。
+- 可选的用户态 Cloudflare WARP 出口，免费模型流量无需 TUN 或 root 权限。
 - 直连、HTTP、HTTPS、SOCKS5、SOCKS5H 连接，以及代理文件。
 - 动态模型发现、原生协议与能力信息、磁盘缓存。
 - 独立管理端口，支持配置编辑、Playground、路由诊断、Token 统计和实时日志。
@@ -76,6 +77,8 @@ docker compose restart
 ```
 
 容器内的服务进程使用普通用户运行。Compose 启用只读根文件系统，并提供可写状态卷和临时 `/tmp` 文件系统。
+
+WARP 只需要出站 UDP（Cloudflare 端点端口 `2408`），因此镜像的普通用户、无 `NET_ADMIN` 配置无需改动；不要为此改用 host 网络或添加 `--cap-add`。如果容器网络禁止 UDP，启用 WARP 会在启动时失败。
 
 | Compose 环境变量            | 默认值   | 作用                                 |
 | --------------------------- | -------- | ------------------------------------ |
@@ -247,9 +250,31 @@ WebUI「上游 Key 管理」页可以单独停用某个 Zen / Go Key（行内按
 
 **注意**：停用与删除都不会让在途请求失败，它们只影响新请求的选路。
 
+### 免费模型 WARP 出口
+
+启用 `warp.enabled` 后，免费通道上的所有免费模型请求——匿名通道、通过 Zen Key 的免费模型回退、免费模型可用性探测，以及匿名模型目录刷新——都改走用户态 Cloudflare WARP 隧道，不再使用任何代理，因此上游看到的是 WARP 出口地址，而不是配置的节点。Go 套餐 Key 与付费模型仍使用原有代理绑定。
+
+隧道运行在网关进程内：注册 WARP 设备，通过 UDP 与 Cloudflare 建立 WireGuard 连接，并在用户态网络栈中终结。它不需要 TUN 设备、root、`NET_ADMIN` 或修改路由表，但宿主机（或容器）必须能向 Cloudflare 端点发送 UDP（端口 `2408`）。注册与 `warp=on` 的 trace 探测在启动时完成；WARP 无法初始化时启动直接失败，不会静默回退到代理。通过 WebUI 启用同样采用失败即拒绝：参数错误会返回错误，旧运行时继续服务。
+
+`warp.pool_size`（1–32，默认 `2`）是**上限**而不是固定数量。活跃出口按并发动态调整：每个在途请求一个出口，另加一个备用，最少 1 个、最多不超过配置上限；空闲 60 秒的多余出口会被回收，因此突发流量会把出口环撑大，空闲后再缩回。出口第一次收到上游 429 或 403 即被淘汰并立刻在后台重新注册（注册仍受 Cloudflare 12 秒的 API 节奏限制，上限越大预热越慢，应按免费模型的并发峰值设置）；免费模型请求会持续切换到其他出口，直到用完 `retry.max_attempts` 次才把最后一个 429 返回客户端。`warp.stack` 默认 `ipv6`，可选 `ipv4` 或 `dual`。
+
+上游的免费额度按**出口网段**计算，所以只有替换出口能拿到不同网段时轮换才有意义：IPv6 出口按 `/64` 去重并冷却 30 分钟，IPv4 出口按 `/32`。Cloudflare WARP 的 IPv4 出口通常是同一个共享 NAT 地址，常被其他用户用尽；IPv6 网络栈的出口则由外层 WireGuard 源地址决定。把 `warp.source_ipv6` 设为路由到本机的 IPv6 前缀（通常是 `/64`，`warp.stack` 默认已是 `ipv6`），每个出口就会从该前缀绑定自己的源地址。Linux 下该地址通过 `IPV6_FREEBIND` 绑定（网关已自动设置），或要求地址已分配到网卡。不会预先探测地址族：握手先尝试 IPv6 端点，全部失败时自动回退到 IPv4 端点（此时出口为共享地址）。留空则共用本机默认源地址。某些网络的 WARP 出口池本身已被用尽，此时每个新出口也会返回 429，网关会持续轮换出口，但仍会在尝试次数用尽后返回 429。`/healthz` 会返回 `warp` 状态块；启用 WARP 但没有任何活跃出口时返回 503。只有 WARP 关闭或存在 Go Key 需要代理时，`no_healthy_proxies` 才会阻塞就绪。诊断请求会占用出口，但不会轮换或淘汰它。关闭 WARP 后，免费通道恢复使用代理。
+
+### 官方系统提示词
+
+每个经过整形的免费模型请求都会携带 OpenCode CLI 自身的系统提示词——基础指令、`<env>` 环境块和内置 skill 列表——因为免费层级会校验请求是否具有 agent 形态。v1 `/zen` 使用 1.x 工具名，`/inference` 与 `/zen/go` 使用 2.x 工具名。环境块包含请求的模型、网关工作目录、平台和 UTC 日期。
+
+注入按协议处理：Chat 的系统与 developer 消息会合并为一条位于最前的 `system` 消息；Anthropic 写入 `system`（字符串，或调用方提供块列表时在最前插入文本块）；Responses 写入 `instructions`。如果系统内容中已包含标记 `You are opencode, an interactive CLI tool`，请求会原样通过，因此已经发送官方提示词的客户端不会被重复注入。通过 Zen 或 Go Key 提供的免费模型也会接受同样的整形，只是仍然从对应 Tier 的代理出网。
+
+### 工具整形
+
+每个经过整形的免费模型请求中，网关会把客户端声明的每个具名工具改名为 `clint_<name>`——`A-Za-z0-9_-` 之外的字符替换为 `_`，名称最长 64 字节，冲突时追加 `_2`、`_3` 等后缀——并追加该通道的完整官方工具集：`/zen` 使用 1.x 定义（`bash`、`edit`、`glob`、`grep`、`read`、`skill`、`task`、`todowrite`、`webfetch`、`websearch`、`write`），`/inference` 与 `/zen/go` 使用 13 个工具的 2.x 定义。没有 `tools`、`tools` 为空数组或使用旧版 `functions` 数组的请求同样会补全官方工具集；`tool_choice`、旧版 `function_call` 和工具调用历史会同步改写。Responses 内置工具和 Anthropic 服务端工具保持不变。
+
+响应会恢复为客户端声明的名称，流式与非流式均适用，包括被拆分到多个 Chat 分块中的工具名。如果上游调用了客户端从未声明的官方工具，该名称会原样透传：网关不会重放或隐藏官方工具调用。
+
 ### 免费模型可用性
 
-只探测 ID 含 `free`（不区分大小写），或元数据输入、输出价格均为零且未弃用的模型，按模型原生协议发送简短探测请求。先尝试已启用的匿名通道，再尝试一个配置的 Zen Key；任一通道返回完整有效响应即视为可用，只有所有实际尝试的通道都明确返回模型不存在或已下架时才自动禁用，从模型列表与路由中移除。认证失败、429、超时、网络错误、5xx 和响应格式异常均视为结果不确定，不新增禁用，1 小时后复测。探测不修改生产 Key / 代理的冷却状态，也不计入请求统计，但仍会访问上游并可能消耗免费额度。
+只探测 ID 含 `free`（不区分大小写），或元数据输入、输出价格均为零且未弃用的模型，按模型原生协议发送简短探测请求。先尝试已启用的匿名通道，再尝试一个配置的 Zen Key；启用 `warp.enabled` 时，每条探测通道都改走 WARP 而不是代理，无法取得出口时结果为 `warp_unavailable`，视为不确定。任一通道返回完整有效响应即视为可用，只有所有实际尝试的通道都明确返回模型不存在或已下架时才自动禁用，从模型列表与路由中移除。认证失败、429、超时、网络错误、5xx 和响应格式异常均视为结果不确定，不新增禁用，1 小时后复测。探测不修改生产 Key / 代理的冷却状态，也不计入请求统计，但仍会访问上游并可能消耗免费额度。
 
 System One 使用原生 `noul` 类型询问“1+1 是否等于 2”，不注入聊天或工具字段。模型列表标明 `native_protocol` 和 `supported_endpoints`；仅在配置 Go Key 且有可用模型时展示轮转别名。升级时解除 v1.3.6 旧探测生成的禁用并立即安排复测，避免非法会话 ID 造成的误判继续保留。
 
@@ -298,6 +323,10 @@ Key 初始化时均衡分配到代理。真实流量可以触发代理检查、K
 | `zen_keys`、`go_keys`       | 未启用匿名模式时，至少需要启用一个上游 Key。                                          |
 | `upstream_key_metadata`     | 按 Key 指纹记录备注、启停与代理绑定；停用的 Key 保留在数组中但不参与路由。             |
 | `anonymous`                 | `false`。                                                                             |
+| `warp.enabled`              | `false`；免费通道流量通过 Cloudflare WARP 出口，不使用代理。                          |
+| `warp.pool_size`            | `2`；WARP 出口上限（活跃出口按并发动态调整），1–32。                                 |
+| `warp.stack`                | `ipv6`；可选 `ipv6`、`ipv4`、`dual`。                                                 |
+| `warp.source_ipv6`          | 空；每个出口绑定的外层 IPv6 源前缀（`/64`），要求 `stack = "ipv6"`。                  |
 | `prefer`                    | `go`；可选 `go`、`zen`。                                                              |
 | `upstream.zen`              | `https://opencode.ai/zen`。                                                           |
 | `upstream.go`               | `https://opencode.ai/zen/go`。                                                        |
@@ -331,9 +360,8 @@ Responses 近似表达，而强制指定的强度可以到达单独靠预算表�
 }
 ```
 
-客户端显式指定的强度始终优先，因此它只替换无人指定的强度：完全未设置，
-或由 `thinking.budget_tokens` 推断出来的强度。设为 `"none"` 可为未请求思考的
-请求移除思考配置。
+客户端显式关闭始终优先。Anthropic 原生 `thinking.type="disabled"` 和 Chat/Responses 的 effort
+`"none"` 都会在协议转换后保持关闭，不会被配置的默认强度重新开启。
 
 两个方向的强度都会如实保留：显式的 `output_config.effort` 不会再被 `thinking`
 块遮蔽，`budget_tokens` 保持其档位（`8192` 为 `high`，`32000` 为 `xhigh`，
@@ -451,14 +479,14 @@ Playground 需要已登录的 Session 和 `X-CSRF-Token`，每个客户端 IP �
 
 ### 界面语言
 
-WebUI 从 `webui/js/i18n.js` 加载翻译，内置 **简体中文**（默认）、**English** 和 **Tiếng Việt**。原始简体中文文案保留在 `index.html` 和 `webui/js/` 中，并始终作为缺少翻译时的回退，因此新增语言不会覆盖原文。
+WebUI 从 `webui/js/i18n.js` 加载翻译，内置 **简体中文**（默认）、**English**、**Tiếng Việt** 和 **Italiano**。原始简体中文文案保留在 `index.html` 和 `webui/js/` 中，并始终作为缺少翻译时的回退，因此新增语言不会覆盖原文。
 
 - 语言选择器位于顶部工具栏右侧，登录卡片上也有一个。
 - 选择结果保存在 `localStorage`，键名为 `opencode2api.ui.lang`。
 - 切换语言会同时重绘静态文案（`data-i18n`、`data-i18n-attr`）和 JavaScript 生成的文案，无需刷新页面。
 - 日期时间格式跟随所选语言。
 
-新增语言时，在 `webui/js/i18n.js` 的 `DICTIONARY` 中增加一个语言块，并在 `SUPPORTED`、`LABELS` 和 `DATE_LOCALES` 中登记其代码。
+新增语言时，在 `webui/js/i18n.js` 的 `DICTIONARY` 中增加一个语言块，并在 `SUPPORTED`、`LABELS`、`FLAGS` 和 `DATE_LOCALES` 中登记其代码，同时加入 `browserLocale` 检测链。
 
 ### 保存与重载
 
@@ -543,7 +571,7 @@ Node.js 仅用于 WebUI 的 JavaScript 语法检查：
 for f in webui/js/*.js webui/js/pages/*.js; do node --input-type=module --check < "$f"; done
 ```
 
-项目通过 `.editorconfig`、`.gitattributes` 和 Go 格式化统一格式。CI 覆盖 Linux / Windows 上的 Go 1.24 与稳定版 Go 的 `go vet` 和构建，以及 Go 格式、WebUI 语法和容器入口脚本语法检查。发布压缩包包含中英越三份 README。
+项目通过 `.editorconfig`、`.gitattributes` 和 Go 格式化统一格式。CI 覆盖 Linux / Windows 上的 Go 1.24 与稳定版 Go 的 `go vet` 和构建，以及 Go 格式、WebUI 语法和容器入口脚本语法检查。发布压缩包包含四份 README。
 
 ## 常见问题
 

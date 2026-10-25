@@ -154,6 +154,11 @@ function fillConfig(value) {
   $("#c-protocols").value = JSON.stringify(value.models.protocols || {}, null, 2);
   $("#c-free-only").checked = !!value.models.free_only;
   $("#c-context-limit").value = value.models.context_limit ?? 160000;
+  const warp = value.warp || {};
+  $("#c-warp-enabled").checked = !!warp.enabled;
+  $("#c-warp-pool-size").value = warp.pool_size || 2;
+  $("#c-warp-stack").value = warp.stack || "ipv6";
+  $("#c-warp-source-ipv6").value = warp.source_ipv6 || "";
   const reasoning = value.reasoning || {};
   $("#c-reasoning-effort").value = reasoning.effort || "";
   $("#c-reasoning-by-model").value = JSON.stringify(reasoning.effort_by_model || {}, null, 2);
@@ -192,6 +197,14 @@ $("#config-form").addEventListener("submit", async (event) => {
         protocols: JSON.parse($("#c-protocols").value || "{}"),
         free_only: $("#c-free-only").checked,
         context_limit: number("#c-context-limit"),
+      },
+      // The WARP block is always submitted: the backend treats an omitted
+      // block as "keep the current setting", and this page renders it.
+      warp: {
+        enabled: $("#c-warp-enabled").checked,
+        pool_size: number("#c-warp-pool-size"),
+        stack: $("#c-warp-stack").value,
+        source_ipv6: $("#c-warp-source-ipv6").value.trim(),
       },
       session: { ttl_seconds: number("#c-session-ttl") },
       reasoning: {

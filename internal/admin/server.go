@@ -111,6 +111,13 @@ func (a *Server) staticHandler() http.Handler {
 				r.URL.Path = "/"
 			}
 		}
+		// The UI ships inside the binary and only changes when the binary does,
+		// so a browser that cached app.js/styles.css under a heuristic freshness
+		// lifetime keeps running the previous build's frontend against the new
+		// backend — the UI then shows stale pages (or breaks outright) until the
+		// cache happens to expire or the operator hard-refreshes. Force
+		// revalidation instead.
+		w.Header().Set("Cache-Control", "no-cache")
 		files.ServeHTTP(w, r)
 	})
 }
@@ -147,6 +154,7 @@ type ConfigView struct {
 	ZenKeys     []SecretView             `json:"zen_keys"`
 	GoKeys      []SecretView             `json:"go_keys"`
 	Anonymous   bool                     `json:"anonymous"`
+	Warp        config.WarpConfig        `json:"warp"`
 	Proxies     []SecretView             `json:"proxies"`
 	ProxyFile   string                   `json:"proxyfile"`
 	Upstream    config.UpstreamConfig    `json:"upstream"`
@@ -199,6 +207,7 @@ type ConfigUpdate struct {
 	ZenKeys    *[]SecretInput        `json:"zen_keys,omitempty"`
 	GoKeys     *[]SecretInput        `json:"go_keys,omitempty"`
 	Anonymous  *bool                 `json:"anonymous,omitempty"`
+	Warp       *config.WarpConfig    `json:"warp,omitempty"`
 	Proxies    *[]SecretInput        `json:"proxies,omitempty"`
 	ProxyFile  string                `json:"proxyfile"`
 	Upstream   config.UpstreamConfig `json:"upstream"`
@@ -273,11 +282,17 @@ func (a *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	if update.Session != nil {
 		session = *update.Session
 	}
+	// WARP is only replaced when the client submits it; a config center that
+	// does not render the block must not silently turn the tunnel off.
+	warpConfig := current.Warp
+	if update.Warp != nil {
+		warpConfig = *update.Warp
+	}
 	candidate := config.Config{
 		ServerKeyMetadata:   current.ServerKeyMetadata,
 		UpstreamKeyMetadata: current.UpstreamKeyMetadata,
 		Rotation:            current.Rotation,
-		Listen:              update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: anonymous, Proxies: proxies, ProxyFile: update.ProxyFile,
+		Listen:              update.Listen, ServerKeys: serverKeys, ZenKeys: zenKeys, GoKeys: goKeys, Anonymous: anonymous, Warp: warpConfig, Proxies: proxies, ProxyFile: update.ProxyFile,
 		Upstream: update.Upstream, Retry: update.Retry, Models: update.Models, Session: session, Performance: update.Performance, Logging: update.Logging, Prefer: update.Prefer,
 		Reasoning: reasoning,
 		WebUI:     config.WebUIConfig{Enabled: update.WebUI.Enabled, Listen: update.WebUI.Listen, Username: current.WebUI.Username, PasswordHash: current.WebUI.PasswordHash, SessionTTLMinutes: update.WebUI.SessionTTLMinutes},
@@ -420,7 +435,7 @@ func (a *Server) configView() ConfigView {
 	cfg := a.manager.Config()
 	effective, restart := a.manager.RestartStatus()
 	return ConfigView{
-		Listen: cfg.Listen, ServerKeys: maskSecrets(cfg.ServerKeys, false), ZenKeys: maskSecrets(cfg.ZenKeys, false), GoKeys: maskSecrets(cfg.GoKeys, false), Anonymous: cfg.Anonymous,
+		Listen: cfg.Listen, ServerKeys: maskSecrets(cfg.ServerKeys, false), ZenKeys: maskSecrets(cfg.ZenKeys, false), GoKeys: maskSecrets(cfg.GoKeys, false), Anonymous: cfg.Anonymous, Warp: cfg.Warp,
 		Proxies: maskSecrets(cfg.Proxies, true), ProxyFile: cfg.ProxyFile, Upstream: cfg.Upstream, Retry: cfg.Retry, Models: cfg.Models,
 		Session:     cfg.Session,
 		Performance: cfg.Performance, Logging: cfg.Logging, Prefer: cfg.Prefer, Reasoning: cfg.Reasoning,

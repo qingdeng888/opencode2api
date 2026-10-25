@@ -29,7 +29,11 @@ import (
 // BunOptions configures a BunTransport. The fields mirror their namesakes on
 // http.Transport; a nil Proxy dials the upstream directly.
 type BunOptions struct {
-	Proxy                 *url.URL
+	Proxy *url.URL
+	// DialContext, when set, replaces the direct or proxied TCP dial. The
+	// caller owns the transport (for example a userspace WARP netstack); Bun
+	// still performs the uTLS handshake over the returned connection.
+	DialContext           func(ctx context.Context, network, address string) (net.Conn, error)
 	ConnectTimeout        time.Duration
 	ResponseHeaderTimeout time.Duration
 	IdleConnTimeout       time.Duration
@@ -53,6 +57,7 @@ type BunOptions struct {
 // connections per host.
 type BunTransport struct {
 	proxy                 *url.URL
+	dialContext           func(context.Context, string, string) (net.Conn, error)
 	dialer                *net.Dialer
 	responseHeaderTimeout time.Duration
 	idleTimeout           time.Duration
@@ -79,6 +84,7 @@ func NewBunTransport(options BunOptions) (*BunTransport, error) {
 	}
 	return &BunTransport{
 		proxy:                 options.Proxy,
+		dialContext:           options.DialContext,
 		dialer:                &net.Dialer{Timeout: options.ConnectTimeout, KeepAlive: 30 * time.Second},
 		responseHeaderTimeout: options.ResponseHeaderTimeout,
 		idleTimeout:           options.IdleConnTimeout,
@@ -532,8 +538,18 @@ func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
 	}
 	var head strings.Builder
 	head.WriteString(method + " " + req.URL.RequestURI() + " HTTP/1.1\r\n")
+	// fetch computes Content-Length itself when it has a body, so it appears in
+	// the common-header block instead of trailing the request. Header order is
+	// part of what a fingerprint sees, so it belongs where the runtime puts it.
+	wroteLength := false
 	for _, name := range bunCommonHeaders {
 		lower := strings.ToLower(name)
+		if lower == "content-length" && body != nil {
+			head.WriteString(name + ": " + strconv.Itoa(len(body)) + "\r\n")
+			delete(values, lower)
+			wroteLength = true
+			continue
+		}
 		if value, ok := values[lower]; ok {
 			head.WriteString(name + ": " + value + "\r\n")
 			delete(values, lower)
@@ -563,7 +579,7 @@ func bunRequestHead(req *http.Request, body []byte) ([]byte, bool, error) {
 	if !hasEncoding {
 		head.WriteString("Accept-Encoding: gzip, deflate, br, zstd\r\n")
 	}
-	if body != nil {
+	if body != nil && !wroteLength {
 		head.WriteString("Content-Length: " + strconv.Itoa(len(body)) + "\r\n")
 	}
 	head.WriteString("\r\n")

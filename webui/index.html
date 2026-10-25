@@ -614,6 +614,50 @@
             <div class="section">
               <div class="section-head">
                 <div>
+                  <h2>免费模型 WARP 出口</h2>
+                  <div class="section-caption">
+                    开启后，免费通道（匿名、免费模型回退、可用性探测、匿名模型目录刷新）改走用户态
+                    Cloudflare WARP 隧道，不再使用任何代理，上游看到的是 WARP 出口地址。进程内完成
+                    WireGuard 握手与用户态网络栈终结，不需要 TUN、root 或改路由表，但宿主机必须能向
+                    Cloudflare 端点发送 UDP（端口 2408）。Go Key 与付费模型仍走原代理。
+                  </div>
+                </div>
+              </div>
+              <div class="form-grid">
+                <div class="field full">
+                  <label class="check-label"
+                    ><input id="c-warp-enabled" type="checkbox" />启用 WARP 出口（免费模型专用）</label
+                  >
+                  <div class="hint">
+                    这是失败即拒绝的开关：WARP 初始化不成功时会拒绝保存并保持原有运行时，不会静默回退到代理。
+                  </div>
+                </div>
+                <div class="field">
+                  <label>出口数量上限（1–32）</label
+                  ><input id="c-warp-pool-size" type="number" min="1" max="32" placeholder="2" />
+                </div>
+                <div class="field">
+                  <label>地址族</label>
+                  <select id="c-warp-stack">
+                    <option value="ipv6">ipv6（推荐）</option>
+                    <option value="ipv4">ipv4</option>
+                    <option value="dual">dual</option>
+                  </select>
+                </div>
+                <div class="field full">
+                  <label>外层源 IPv6 前缀（可选）</label
+                  ><input id="c-warp-source-ipv6" placeholder="2001:db8:1:2::/64" />
+                  <div class="hint">
+                    上游免费额度按出口网段计算：每个出口从该前缀绑定自己的源地址，替换出口才会真正换到新网段。
+                    需要 <code>warp.stack</code> 为 <code>ipv6</code>；留空则共用本机默认源地址。前缀需路由到本机
+                    （Linux 下网关会用 <code>IPV6_FREEBIND</code> 绑定）。
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="section">
+              <div class="section-head">
+                <div>
                   <h2>会话隔离</h2>
                   <div class="section-caption">
                     每个下游会话（客户端会话头，或按调用方 Key

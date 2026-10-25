@@ -3,12 +3,12 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"opencode2api/internal/config"
+	wire "opencode2api/internal/protocol"
 )
 
 // The upstream bans the calling IP once a conversation's context — the model's
@@ -107,42 +107,37 @@ func estimateTextTokens(text string) int {
 	return wide + (ascii+3)/4
 }
 
-// injectionReserveTokens is the token cost of the tool definitions the gateway
-// adds for the upstream free-tier gates. A request whose own prompt already
-// fills the window would otherwise still reach the upstream over the limit
-// after injection, so the reserve is subtracted from every budget.
+// injectionReserveTokens is the token cost the gateway adds to a shaped
+// free-model request: the official system prompt plus the official toolset of
+// the lane. A request whose own prompt already fills the window would otherwise
+// still reach the upstream over the limit after shaping, so the reserve is
+// counted against every budget.
 var (
 	injectionReserveOnce   sync.Once
 	injectionReserveTokens int
 )
 
 // injectedToolReserve returns the tokens the gateway may add to an outbound
-// body. It measures the embedded v2 tool set, the largest injection, and adds
-// a small allowance for the v1 single-tool stub and the stream/usage fields.
+// body. It measures both official tool sets and both system prompts — the
+// larger of each pair is the worst case — instead of hard-coding a figure that
+// would drift as the captured assets change.
 func injectedToolReserve() int {
 	injectionReserveOnce.Do(func() {
-		definitions := map[string]opencodeToolDefinition{}
-		if err := json.Unmarshal(opencodeToolsJSON, &definitions); err != nil {
-			// An unreadable embedded file means no injection happens; keep a
-			// modest reserve so the accounting still holds if it does.
-			injectionReserveTokens = 512
-			return
-		}
-		names := make([]string, 0, len(definitions))
-		for name := range definitions {
-			names = append(names, name)
-		}
-		// Sort for a deterministic figure across runs.
-		sort.Strings(names)
-		content := make(map[string]any, len(definitions))
-		for _, name := range names {
-			definition := definitions[name]
-			content[name] = map[string]any{
-				"description": definition.Description,
-				"parameters":  definition.Parameters,
+		reserve := 0
+		for _, v1 := range []bool{true, false} {
+			// Render the toolset exactly as it goes on the wire, so the
+			// structural overhead of the shapes is counted too.
+			toolset := officialToolset(wire.Chat, v1)
+			tokens := estimateJSONTokens(toolset)
+			prompt := opencodeSystemPrompt("", v1)
+			tokens += estimateTextTokens(prompt)
+			if tokens > reserve {
+				reserve = tokens
 			}
 		}
-		injectionReserveTokens = estimateJSONTokens(content) + 256
+		// Allow for the stream/usage fields and the env block the prompt
+		// carries a model-specific line for.
+		injectionReserveTokens = reserve + 256
 	})
 	return injectionReserveTokens
 }
