@@ -2326,9 +2326,14 @@ $("#theme-toggle").onclick = () => {
   syncThemeIcon();
 };
 
-async function loadAvailability() {
+async function loadAvailability(reprobe = false) {
   try {
-    const data = await api("/api/models/availability");
+    // The refresh button asks for a real sweep: POST /api/models/probe marks
+    // every automatic model due and wakes the probe loop, so the operator sees
+    // fresh results rather than the cached snapshot. Page entry only reads.
+    const data = reprobe
+      ? await api("/api/models/probe", { method: "POST", body: "{}" })
+      : await api("/api/models/availability");
     $("#availability-error").textContent = "";
     $("#availability-models").replaceChildren();
     for (const item of data.models) {
@@ -2400,4 +2405,4 @@ async function loadAvailability() {
     $("#availability-error").textContent = error.message;
   }
 }
-$("#availability-refresh").onclick = loadAvailability;
+$("#availability-refresh").onclick = () => loadAvailability(true);
