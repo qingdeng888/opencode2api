@@ -388,9 +388,10 @@ function renderProxies(data = {}) {
       testCell.innerHTML = '<span class="loading"></span> 测试中…';
     } else if (last) {
       testCell.className = last.ok ? "proxy-test-ok" : "proxy-test-fail";
+      const latency = Number.isFinite(last.latency_ms) ? ` · ${last.latency_ms}ms` : "";
       testCell.textContent = last.ok
-        ? `✅ HTTP ${last.status} · ${last.latency_ms}ms`
-        : `❌ ${last.error || "失败"} · ${last.latency_ms}ms`;
+        ? `✅ HTTP ${last.status}${latency}`
+        : `❌ ${last.error || "失败"}${latency}`;
     } else {
       testCell.textContent = "未测试";
     }

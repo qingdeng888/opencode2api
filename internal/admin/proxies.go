@@ -379,10 +379,6 @@ func (a *Server) handleTestProxy(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", "proxy id is required")
 		return
 	}
-	if !a.allowDebug(clientIP(r)) {
-		writeAdminError(w, http.StatusTooManyRequests, "debug_rate_limited", "too many proxy tests; retry in one minute")
-		return
-	}
 	client := a.manager.ProxyClient(id)
 	if client == nil {
 		writeAdminError(w, http.StatusNotFound, "unknown_proxy", "proxy is no longer configured")
