@@ -104,6 +104,7 @@ type anonymousCursor struct {
 	start  int
 	offset int
 	used   []bool
+	single bool
 }
 
 // anonymousPool builds one anonymous node per proxy transport, or an empty
@@ -150,6 +151,25 @@ func (p *anonymousNodes) HasPool() bool {
 	return p != nil && p.hasPool
 }
 
+// CursorForProxy returns a cursor whose first Next hands back the node that
+// uses proxy and whose second returns nil, so a relay-pinned diagnostic
+// attempts exactly one exit. A proxy outside the pool yields the same
+// single-shot cursor over no node, which the caller reports as an error.
+func (p *anonymousNodes) CursorForProxy(proxy *proxyTransport) anonymousCursor {
+	c := anonymousCursor{pool: p, start: -1, single: true}
+	if p == nil || proxy == nil {
+		return c
+	}
+	c.offset = len(p.nodes)
+	for i, node := range p.nodes {
+		if node.proxy == proxy {
+			c.start = i
+			return c
+		}
+	}
+	return c
+}
+
 // CursorFor returns a cursor whose first node is stable for a non-empty
 // affinity key, keeping a conversation on one exit; an empty affinity rotates
 // the starting node round-robin.
@@ -166,6 +186,18 @@ func (p *anonymousNodes) CursorFor(affinity string) anonymousCursor {
 		start = int(hash.Sum64() % uint64(len(p.nodes)))
 	}
 	return anonymousCursor{pool: p, start: start}
+}
+
+// CursorForOffset is CursorFor shifted by offset nodes. A request that has
+// already spent offset attempts starts on the next node instead of repeating
+// the exit that just failed it.
+func (p *anonymousNodes) CursorForOffset(affinity string, offset int) anonymousCursor {
+	cursor := p.CursorFor(affinity)
+	if p == nil || len(p.nodes) == 0 || offset <= 0 {
+		return cursor
+	}
+	cursor.start = (cursor.start + offset) % len(p.nodes)
+	return cursor
 }
 
 // AllowAttempt reports whether an anonymous attempt may run. An open breaker
@@ -289,6 +321,14 @@ func (c *anonymousCursor) Next() *anonymousNode {
 	n := len(c.pool.nodes)
 	if c.used == nil {
 		c.used = make([]bool, n)
+	}
+	if c.single {
+		index := c.start
+		c.start = -1
+		if index < 0 || index >= n {
+			return nil
+		}
+		return c.pool.nodes[index]
 	}
 	now := time.Now().UnixNano()
 	isBlocked := func(node *anonymousNode) bool {
@@ -490,7 +530,14 @@ func transportPool(proxies []string, cfg config.PerformanceConfig, responseHeade
 		if err != nil {
 			return nil, fmt.Errorf("proxy %s: %w", config.RedactURL(raw), err)
 		}
-		proxy := &proxyTransport{index: len(p.items), name: raw, pool: isPool, client: &http.Client{Transport: transport}, bun: &http.Client{Transport: bun}}
+		// Redirects can forward x-api-key and replay an inference body to a
+		// different origin. The configured endpoint owns the request directly.
+		rejectRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		proxy := &proxyTransport{
+			index: len(p.items), name: raw, pool: isPool,
+			client: &http.Client{Transport: transport, CheckRedirect: rejectRedirect},
+			bun:    &http.Client{Transport: bun, CheckRedirect: rejectRedirect},
+		}
 		proxy.healthy.Store(true)
 		p.items = append(p.items, proxy)
 	}
@@ -548,7 +595,15 @@ func (p *proxyTransports) checkClaimedProxy(ctx context.Context, proxy *proxyTra
 	req, err := http.NewRequestWithContext(checkCtx, http.MethodGet, target, nil)
 	if err == nil {
 		req.Header.Set("User-Agent", httpx.V2UserAgent())
-		resp, requestErr := proxy.client.Do(req)
+		// Probe with the same client free-model traffic uses. The Bun client
+		// reproduces the official OpenCode client's TLS fingerprint, so a probe
+		// through it measures the path it judges instead of a plain Go TLS
+		// handshake that some origins treat differently.
+		probeClient := proxy.client
+		if proxy.bun != nil {
+			probeClient = proxy.bun
+		}
+		resp, requestErr := probeClient.Do(req)
 		err = requestErr
 		if resp != nil {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
@@ -600,6 +655,7 @@ type upstreamNode struct {
 	key            string
 	index          int
 	preferredProxy int
+	bound          bool
 	proxyIndex     atomic.Int64
 	failures       atomic.Uint32
 	cooldownUntil  atomic.Int64
@@ -626,7 +682,7 @@ type upstreamNodes struct {
 // Auto keys take round-robin positions (i % N); when there are fewer keys than
 // proxies, the remaining proxies stay idle as failover targets. Bind keys pin
 // one proxy; rotate keys pick a healthy proxy per attempt. It needs at least
-// one proxy transport.
+// one proxy transport. binding returns the mode and proxy id for a key.
 func nodePool(keys []string, transports *proxyTransports, cooldown time.Duration, binding func(key string) (string, string)) (*upstreamNodes, error) {
 	if transports == nil || len(transports.items) == 0 {
 		return nil, fmt.Errorf("at least one proxy transport is required")
@@ -640,6 +696,13 @@ func nodePool(keys []string, transports *proxyTransports, cooldown time.Duration
 	if len(keys) == 0 {
 		return pool, nil
 	}
+	proxyMap := make(map[string]int, len(transports.items)*2)
+	for i, t := range transports.items {
+		proxyMap[t.name] = i
+		clean, _ := config.ParseProxyEntry(t.name)
+		proxyMap[clean] = i
+	}
+
 	for i, key := range keys {
 		node := &upstreamNode{key: key, index: i}
 		mode, proxyID := "", ""
@@ -648,8 +711,9 @@ func nodePool(keys []string, transports *proxyTransports, cooldown time.Duration
 		}
 		switch mode {
 		case config.ProxyModeBind:
-			if idx := transports.indexByID(proxyID); idx >= 0 {
+			if idx := indexByRef(transports, proxyMap, proxyID); idx >= 0 {
 				node.proxyMode = config.ProxyModeBind
+				node.bound = true
 				node.preferredProxy = idx
 				node.proxyIndex.Store(int64(idx))
 				pool.nodes = append(pool.nodes, node)
@@ -685,6 +749,24 @@ func (p *proxyTransports) indexByID(id string) int {
 		}
 	}
 	return -1
+}
+
+// indexByRef resolves a binding reference to a proxy position. The reference
+// may be a proxy fingerprint, a raw proxy URL, or a URL with the pool marker
+// stripped; the map handles the latter two and the fingerprint path keeps
+// bindings written by older versions working.
+func indexByRef(p *proxyTransports, proxyMap map[string]int, ref string) int {
+	if ref == "" {
+		return -1
+	}
+	if idx, ok := proxyMap[ref]; ok {
+		return idx
+	}
+	clean, _ := config.ParseProxyEntry(ref)
+	if idx, ok := proxyMap[clean]; ok {
+		return idx
+	}
+	return p.indexByID(ref)
 }
 
 // nextRotateProxy advances the shared rotation cursor and returns the first
@@ -732,7 +814,16 @@ func (p *upstreamNodes) RestoreProxy(recoveredProxy int) int {
 			continue
 		}
 		current := int(node.proxyIndex.Load())
-		if node.preferredProxy != recoveredProxy || current == recoveredProxy {
+		if node.preferredProxy != recoveredProxy {
+			continue
+		}
+		if node.bound {
+			// Clear failures and cooldown so bound node immediately resumes traffic on recovered proxy.
+			node.failures.Store(0)
+			node.cooldownUntil.Store(0)
+			continue
+		}
+		if current == recoveredProxy {
 			continue
 		}
 		if current >= 0 && current < len(p.bindingCount) {
@@ -798,6 +889,10 @@ func (p *upstreamNodes) RebindProxy(failedProxy int) int {
 			continue
 		}
 		if int(node.proxyIndex.Load()) != failedProxy {
+			continue
+		}
+		if node.bound {
+			// Fail-closed: bound nodes never migrate to another proxy or direct route.
 			continue
 		}
 		target := p.replacementLocked(failedProxy, true)

@@ -9,8 +9,7 @@
 // and, on the free tier, the 1.x toolset. The v2 lane is the /inference
 // origin (upstream.anonymous) and the Go plan's /zen/go origin, which expect
 // the OpenCode 2.x CLI shape. The anonymous free tier uses the configured v2
-// /inference origin only; the retired v1 fallback is kept in
-// anonymousUpstreams but commented out.
+// /inference origin only.
 package gateway
 
 import (
@@ -24,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"opencode2api/internal/config"
@@ -31,6 +31,7 @@ import (
 	"opencode2api/internal/identity"
 	"opencode2api/internal/jsonutil"
 	"opencode2api/internal/models"
+	"opencode2api/internal/oauth"
 	wire "opencode2api/internal/protocol"
 	"opencode2api/internal/rotation"
 	"opencode2api/internal/session"
@@ -75,6 +76,7 @@ type Gateway struct {
 	rotation   *rotation.Manager
 	cfg        config.Config
 	logger     *slog.Logger
+	redactor   *config.Redactor
 	transports *proxyTransports
 	zenNodes   *upstreamNodes
 	goNodes    *upstreamNodes
@@ -97,6 +99,12 @@ type Gateway struct {
 	// freeTierBlock is how long an exit the free tier flagged stays out of the
 	// anonymous cursor. Zero uses freeTierBlockTTL.
 	freeTierBlock time.Duration
+	// refreshMu prevents overlapping catalog refreshes across concurrent or scheduled callers.
+	refreshMu              sync.Mutex
+	resolveGoOAuth         func(context.Context) (*oauth.Connection, error)
+	onGoOAuthUnauthorized  func(context.Context, oauth.Credential)
+	resolveZenOAuth        func(context.Context) (*oauth.Connection, error)
+	onZenOAuthUnauthorized func(context.Context, oauth.Credential)
 }
 
 // New builds a Gateway for cfg: one proxy transport per runtime proxy (a
@@ -107,6 +115,9 @@ type Gateway struct {
 // and may be nil, in which case sessions are hashed from content and scope;
 // warpPool may be nil when the WARP egress is disabled.
 func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, sessions *session.Mapper, warpPool *warp.Pool) (*Gateway, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	cfg.Rotation.Defaults()
 	rotationManager, err := rotation.New("", cfg.Rotation)
 	if err != nil {
@@ -117,11 +128,21 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, ses
 		return nil, err
 	}
 	cooldown := time.Duration(cfg.Performance.FailureCooldownSeconds) * time.Second
-	zenNodes, err := nodePool(cfg.EnabledZenKeys(), transports, cooldown, cfg.UpstreamKeyBinding)
+	// OAuth connections replace that tier's manual keys for routing. Enabled-key
+	// filtering stays local so disabled keys never build a runtime pool.
+	zenKeys := cfg.EnabledZenKeys()
+	if cfg.ZenOAuth != nil {
+		zenKeys = nil
+	}
+	zenNodes, err := nodePool(zenKeys, transports, cooldown, combinedKeyBinding(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("zen node pool: %w", err)
 	}
-	goNodes, err := nodePool(cfg.EnabledGoKeys(), transports, cooldown, cfg.UpstreamKeyBinding)
+	goKeys := cfg.EnabledGoKeys()
+	if cfg.GoOAuth != nil {
+		goKeys = nil
+	}
+	goNodes, err := nodePool(goKeys, transports, cooldown, combinedKeyBinding(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("go node pool: %w", err)
 	}
@@ -130,10 +151,13 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, ses
 	catalog.SetFreeOnly(cfg.Models.FreeOnly)
 	// Discovery must never advertise more context than the gateway forwards.
 	catalog.SetContextLimit(cfg.Models.ContextLimit)
-	return &Gateway{
+	redactor := config.SecretRedactor()
+	redactor.Replace(cfg)
+	gateway := &Gateway{
 		cfg:            cfg,
 		rotation:       rotationManager,
 		logger:         logger,
+		redactor:       redactor,
 		transports:     transports,
 		zenNodes:       zenNodes,
 		goNodes:        goNodes,
@@ -144,7 +168,31 @@ func New(cfg config.Config, logger *slog.Logger, monitor *telemetry.Metrics, ses
 		sessions:       sessions,
 		attemptTimeout: attemptDeadline(cfg),
 		freeTierBlock:  time.Duration(cfg.Performance.FreeTierBlockSeconds) * time.Second,
-	}, nil
+	}
+	gateway.restoreOAuthCatalog()
+	return gateway, nil
+}
+
+// combinedKeyBinding merges the two per-key proxy binding sources. The local
+// upstream-key metadata (auto/bind/rotate) takes precedence; the top-level
+// proxy_bindings map fills in keys that only have an explicit target. Both
+// fingerprints and raw keys are accepted in the bindings map.
+func combinedKeyBinding(cfg config.Config) func(key string) (string, string) {
+	return func(key string) (string, string) {
+		mode, proxyID := cfg.UpstreamKeyBinding(key)
+		if mode != "" && mode != config.ProxyModeAuto {
+			return mode, proxyID
+		}
+		if proxyID == "" && len(cfg.ProxyBindings) > 0 {
+			if target, ok := cfg.ProxyBindings[config.Fingerprint(key)]; ok {
+				return config.ProxyModeBind, target
+			}
+			if target, ok := cfg.ProxyBindings[key]; ok {
+				return config.ProxyModeBind, target
+			}
+		}
+		return mode, proxyID
+	}
 }
 
 // anonymousBackoffFromConfig converts the configured hours into the breaker's
@@ -316,7 +364,14 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			g.handleRotation(w, r, external, payload, id, model)
 			return
 		}
-		if !g.catalog.Supported(model) {
+		oauthModel := false
+		for _, connection := range []*oauth.Connection{g.cfg.GoOAuth, g.cfg.ZenOAuth} {
+			if connection != nil {
+				_, included := connection.Routes[model]
+				oauthModel = oauthModel || included
+			}
+		}
+		if !oauthModel && !g.catalog.Supported(model) {
 			// A model the catalog has never heard of is a bad model NAME: 404
 			// tells a client to pick a different model. A model the catalog
 			// knows but cannot serve is a capability or routing problem, and
@@ -332,13 +387,18 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			}
 			return
 		}
-		route, err := g.catalog.Route(model, g.hasZenKeys(), g.hasGoKeys(), g.cfg.Anonymous)
+		route, err := g.routeForModel(model, "")
 		if override, selected := debugKeyOverrideFrom(r.Context()); selected {
 			// A per-key diagnostic must not silently be served by another key,
 			// another tier or the anonymous lane.
-			route, err = g.catalog.RouteForTier(model, override.Tier, g.hasZenKeys(), g.hasGoKeys())
+			route, err = g.routeForModel(model, override.Tier)
 		}
 		if err != nil {
+			var oauthError *oauth.OAuthError
+			if errors.As(err, &oauthError) {
+				wire.WriteError(w, external, http.StatusServiceUnavailable, oauthError.Error(), "oauth_auth_error", "")
+				return
+			}
 			wire.WriteError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
 			return
 		}
@@ -432,6 +492,11 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				wire.WriteError(w, external, status, message, code, ids.Request)
 				return
 			}
+			var oauthError *oauth.OAuthError
+			if errors.As(err, &oauthError) {
+				wire.WriteError(w, external, http.StatusServiceUnavailable, oauthError.Error(), "oauth_auth_error", ids.Request)
+				return
+			}
 			// Every exit this request could use is under the free tier's IP
 			// block. A 502 would read as a transient upstream fault and invite
 			// the client to retry into the same penalty, so answer with the
@@ -457,7 +522,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		}
 		w.Header().Set("x-request-id", ids.Request)
 		if resp.StatusCode/100 != 2 {
-			copyErrorResponse(w, external, resp, ids.Request)
+			g.copyErrorResponse(w, external, resp, ids.Request)
 			return
 		}
 		shape := requestShapeFrom(r.Context())
@@ -473,13 +538,17 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
-			w.WriteHeader(resp.StatusCode)
 			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, toolRenames)
 			var usage wire.Usage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {
-				usage, usageReported, err = wire.ForwardStream(r.Context(), w, streamBody, upstreamRoute.Protocol, model)
+				streamWriter := w
+				if flusher, ok := w.(http.Flusher); ok {
+					streamWriter = &deferredStreamWriter{ResponseWriter: w, flusher: flusher, status: resp.StatusCode}
+				}
+				usage, usageReported, err = wire.ForwardStream(r.Context(), streamWriter, streamBody, upstreamRoute.Protocol, model)
 			} else {
+				w.WriteHeader(resp.StatusCode)
 				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, streamBody, upstreamRoute.Protocol, external, model)
 			}
 			if meta != nil {
@@ -496,9 +565,13 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			}
 			return
 		}
-		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, (64<<20)+1))
 		if err != nil {
 			wire.WriteError(w, external, http.StatusBadGateway, "failed to read upstream response", "upstream_error", ids.Request)
+			return
+		}
+		if len(responseBody) > 64<<20 {
+			wire.WriteError(w, external, http.StatusBadGateway, "upstream response exceeds 64 MiB", "upstream_error", ids.Request)
 			return
 		}
 		if upstreamRoute.Anonymous || shape.shaped {
@@ -530,6 +603,32 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(responseBody)
 	}
+}
+
+// deferredStreamWriter keeps the upstream success status pending while the
+// first SSE frame is validated, allowing an invalid prelude to become a 502.
+type deferredStreamWriter struct {
+	http.ResponseWriter
+	flusher   http.Flusher
+	status    int
+	committed bool
+}
+
+func (w *deferredStreamWriter) WriteHeader(status int) {
+	if !w.committed {
+		w.committed = true
+		w.ResponseWriter.WriteHeader(status)
+	}
+}
+
+func (w *deferredStreamWriter) Write(body []byte) (int, error) {
+	w.WriteHeader(w.status)
+	return w.ResponseWriter.Write(body)
+}
+
+func (w *deferredStreamWriter) Flush() {
+	w.WriteHeader(w.status)
+	w.flusher.Flush()
 }
 
 // handleSystemOne serves System One decision requests on their own endpoint.
@@ -566,7 +665,7 @@ func (g *Gateway) handleSystemOne(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	route, err := g.catalog.Route(model, g.hasZenKeys(), g.hasGoKeys(), g.cfg.Anonymous)
+	route, err := g.routeForModel(model, "")
 	if err != nil {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadRequest, err.Error(), "invalid_request_error", "model")
 		return
@@ -647,7 +746,7 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	}
 	w.Header().Set("x-request-id", ids.Request)
 	if resp.StatusCode/100 != 2 {
-		copyErrorResponse(w, wire.SystemOne, resp, ids.Request)
+		g.copyErrorResponse(w, wire.SystemOne, resp, ids.Request)
 		return
 	}
 	if contentType := resp.Header.Get("Content-Type"); strings.HasPrefix(contentType, "text/event-stream") {
@@ -660,9 +759,13 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 		_, _ = io.Copy(w, resp.Body)
 		return
 	}
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, (64<<20)+1))
 	if err != nil {
 		wire.WriteError(w, wire.SystemOne, http.StatusBadGateway, "failed to read upstream response", "upstream_error", ids.Request)
+		return
+	}
+	if len(responseBody) > 64<<20 {
+		wire.WriteError(w, wire.SystemOne, http.StatusBadGateway, "upstream response exceeds 64 MiB", "upstream_error", ids.Request)
 		return
 	}
 	if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
@@ -702,6 +805,13 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		if tier == config.TierGo {
 			baseURL = g.cfg.Upstream.Go
 		}
+		if connection := g.tierOAuth(tier); connection != nil && !route.Anonymous {
+			oauthRoute, ok := connection.Routes[route.ID]
+			if !ok {
+				return nil, errors.New("model is not included in the connected OAuth plan")
+			}
+			baseURL = oauthRoute.BaseURL
+		}
 		upstreamPayload, err := wire.PrepareRequest(from, protocol, input, baseURL)
 		if err != nil {
 			if tier != route.Tier {
@@ -736,15 +846,17 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 // client's protocol. It keeps the status and any Retry-After, and takes the
 // message from a JSON body's error.message or message, falling back to the
 // status text.
-func copyErrorResponse(w http.ResponseWriter, protocol wire.Protocol, resp *http.Response, requestID string) {
+func (g *Gateway) copyErrorResponse(w http.ResponseWriter, protocol wire.Protocol, resp *http.Response, requestID string) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-		w.Header().Set("Retry-After", retryAfter)
+		w.Header().Set("Retry-After", g.redactor.String(retryAfter))
 	}
 	message := http.StatusText(resp.StatusCode)
 	var value map[string]any
 	if json.Unmarshal(body, &value) == nil {
 		message = jsonutil.FirstString(jsonutil.StringAt(value, "error", "message"), jsonutil.StringAt(value, "message"), message)
 	}
-	wire.WriteError(w, protocol, resp.StatusCode, message, "upstream_error", requestID)
+	// Error bodies may echo the credential that the upstream rejected. Decode
+	// first so escaped JSON strings receive the same redaction as plain text.
+	wire.WriteError(w, protocol, resp.StatusCode, g.redactor.String(message), "upstream_error", requestID)
 }

@@ -96,11 +96,12 @@ func (g *Gateway) newWarpLease(lease *warp.Lease, useBun bool) (*warpLease, erro
 	if err != nil {
 		return nil, err
 	}
+	rejectRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &warpLease{
 		lease:   lease,
 		pool:    g.warp,
-		regular: &http.Client{Transport: transport},
-		bun:     &http.Client{Transport: bun},
+		regular: &http.Client{Transport: transport, CheckRedirect: rejectRedirect},
+		bun:     &http.Client{Transport: bun, CheckRedirect: rejectRedirect},
 		useBun:  useBun,
 	}, nil
 }
@@ -193,7 +194,11 @@ func (g *Gateway) doWARPAttempt(ctx context.Context, req *http.Request, baseURL,
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 			body = peekResponseBody(resp)
 		}
-		g.warp.Report(lease, resp.StatusCode, body)
+		var retryAfter time.Duration
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		}
+		g.warp.ReportWithRetryAfter(lease, resp.StatusCode, body, retryAfter)
 	}
 	resp.Body = &warpBody{ReadCloser: resp.Body, lease: owned, diagnostic: diagnostic}
 	return resp, label, nil
@@ -222,7 +227,7 @@ func warpProxy(label string) *proxyTransport {
 // proxy. The lane breaker still applies; per-proxy cooldowns and the block
 // cursor do not, because a block is a property of the WARP exit and rotation
 // replaces it.
-func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (*http.Response, error, int) {
+func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs, attemptOffset int) (response *http.Response, resultErr error, resultAttempts int) {
 	if !g.anonymous.AllowAttempt() {
 		return nil, errAnonymousLanePaused, 0
 	}
@@ -236,20 +241,28 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 	prepared := make([][]byte, len(upstreams))
 	renames := make([]*wire.ToolRenames, len(upstreams))
 	for index, baseURL := range upstreams {
-		prepared[index], renames[index] = prepareAnonymousBody(rawBody, protocol, models.IsV1Upstream(baseURL))
+		prepared[index], renames[index] = prepareAnonymousBody(rawBody, protocol, models.IsV1Upstream(baseURL), g.cfg.Upstream.PromptEnvironment)
 	}
 	// A 429 is scoped to the exit that carried it, so the request keeps
 	// rotating exits until the configured attempt budget is spent; only then
 	// does the last 429 reach the client.
+	isTitle := isTitleGenerationBody(rawBody)
 	limit := g.cfg.Retry.MaxAttempts
-	if limit < 1 {
+	if limit < 1 || isTitle {
+		// A title request gets one attempt: on failure it is answered locally.
 		limit = 1
 	}
 	firstEventTimeout := time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds) * time.Second
 	var lastResponse *http.Response
+	defer func() {
+		if lastResponse != nil && lastResponse != response {
+			httpx.DrainAndClose(lastResponse.Body)
+		}
+	}()
 	var lastErr error
 	blocked, halted := false, false
 	attempts := 0
+	triedEgresses := make(map[string]bool)
 	for attempts < limit {
 		if ctx.Err() != nil {
 			if lastErr == nil {
@@ -258,6 +271,7 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 			break
 		}
 		leaseBlocked := false
+		lastStatus := 0
 		for index, baseURL := range upstreams {
 			if ctx.Err() != nil {
 				break
@@ -268,10 +282,7 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 				meta.Attempts = attemptOffset + attempts
 				meta.Tier = string(config.TierZen)
 			}
-			if lastResponse != nil {
-				httpx.DrainAndClose(lastResponse.Body)
-				lastResponse = nil
-			}
+			bufferRetryResponse(lastResponse)
 			req, err := upstreamRequest(ctx, baseURL, protocol, prepared[index], ids, anonymousZenKey)
 			if err != nil {
 				return nil, err, attempts
@@ -280,21 +291,23 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 			started := time.Now()
 			resp, egress, err := g.doWARPAttempt(ctx, req, baseURL, route.ID, firstEventTimeout)
 			duration := time.Since(started)
+			lastResponse = replaceRetryResponse(lastResponse, resp)
 			if ctx.Err() != nil {
-				lastResponse, lastErr = resp, err
+				lastErr = err
 				if lastErr == nil && lastResponse == nil {
 					lastErr = ctx.Err()
 				}
 				break
 			}
 			status := upstreamStatus(resp)
+			lastStatus = status
 			g.recordUpstreamAttempt(ctx, route, ids, attemptOffset+attempts, "anonymous", "anonymous", true, warpProxy(egress), resp, err, duration)
 			if err == nil && status/100 == 2 {
 				g.anonymous.NoteSuccess()
 				g.logger.Debug("anonymous WARP upstream accepted request", "component", "upstream", "event", "anonymous_attempt_succeeded", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", egress, "status", status, "duration_ms", duration.Milliseconds())
 				return resp, nil, attempts
 			}
-			lastResponse, lastErr = resp, err
+			lastErr = err
 			if err != nil {
 				g.logger.Debug("anonymous WARP transport attempt failed", "component", "upstream", "event", "anonymous_attempt_transport_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", egress, "duration_ms", duration.Milliseconds(), "error", err)
 				// A broken tunnel affects both upstream gates; rotate the exit
@@ -313,6 +326,13 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 				g.logger.Warn("upstream rejected the request; not trying other upstreams", "component", "upstream", "event", "deterministic_rejection", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "status", status, "duration_ms", duration.Milliseconds())
 				break
 			}
+			if status == http.StatusTooManyRequests {
+				triedEgresses[strings.TrimPrefix(egress, "warp:")] = true
+				if !g.warp.HasUntriedActive(triedEgresses) {
+					g.logger.Warn("all active WARP exits exhausted or cooling down; stopping retries", "component", "upstream", "event", "warp_429_exhausted", "request_id", ids.Request, "attempt", attempts)
+					break
+				}
+			}
 			g.logger.Debug("anonymous WARP upstream returned an error response; trying the next upstream or exit", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", egress, "status", status, "duration_ms", duration.Milliseconds())
 			if index+1 < len(upstreams) {
 				break
@@ -321,15 +341,29 @@ func (g *Gateway) doWarpAnonymousUpstream(ctx context.Context, route models.Rout
 		if halted || ctx.Err() != nil {
 			break
 		}
-		if !leaseBlocked && upstreamStatus(lastResponse) != http.StatusTooManyRequests {
+		if lastStatus == http.StatusTooManyRequests {
+			if !g.warp.HasUntriedActive(triedEgresses) {
+				break
+			}
+		}
+		if !leaseBlocked && lastStatus != http.StatusTooManyRequests {
 			if pause, tripped := g.anonymous.NoteFailure(); tripped {
-				g.logger.Warn("anonymous lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "status", upstreamStatus(lastResponse), "paused_for", pause.String())
+				g.logger.Warn("anonymous lane circuit breaker opened", "component", "upstream", "event", "anonymous_breaker_open", "status", lastStatus, "paused_for", pause.String())
 				break
 			}
 		}
 	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return nil, ctx.Err(), attempts
+	}
 	if halted {
 		return lastResponse, errDeterministicClientRejection, attempts
+	}
+	if isTitle {
+		if fallback := titleFallback(g.logger, route.ID, rawBody, lastResponse, lastErr); fallback != nil {
+			lastResponse = nil
+			return fallback, nil, attempts
+		}
 	}
 	if lastResponse != nil {
 		if blocked {

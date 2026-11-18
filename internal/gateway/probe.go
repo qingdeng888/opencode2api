@@ -57,7 +57,7 @@ func (g *Gateway) resolvedEffort(model string, tier config.Tier, protocol wire.P
 // free tier by prepareAnonymousBody. v1 reports whether the probe targets the
 // v1 lane (models.IsV1Upstream), which selects the 1.x toolset instead of the
 // 2.x one.
-func probePayload(model string, protocol wire.Protocol, effort string, v1 bool) ([]byte, error) {
+func probePayload(model string, protocol wire.Protocol, effort string, v1 bool, environment *config.PromptEnvironmentConfig) ([]byte, error) {
 	if protocol == wire.SystemOne {
 		// TypeSafe's native boolean type is "noul", not JSON Schema boolean.
 		return json.Marshal(map[string]any{"model": model, "state": "1 + 1 = 2", "questions": map[string]any{
@@ -76,7 +76,7 @@ func probePayload(model string, protocol wire.Protocol, effort string, v1 bool) 
 	if err != nil {
 		return nil, err
 	}
-	shaped, _ := prepareAnonymousBody(b, protocol, v1)
+	shaped, _ := prepareAnonymousBody(b, protocol, v1, environment)
 	return shaped, nil
 }
 
@@ -224,7 +224,7 @@ func (g *Gateway) probeFreeModel(ctx context.Context, model string) probeResult 
 // (http_<status>, model_unavailable, probe_timeout, warp_unavailable, ...) and
 // whether the upstream rejected the reasoning effort.
 func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, baseURL, key, model string, protocol wire.Protocol, ids identity.RequestIDs, effort string, overWARP bool) probeResult {
-	b, err := probePayload(model, protocol, effort, models.IsV1Upstream(baseURL))
+	b, err := probePayload(model, protocol, effort, models.IsV1Upstream(baseURL), g.cfg.Upstream.PromptEnvironment)
 	if err != nil {
 		return probeResult{reason: "request_conversion_error"}
 	}
@@ -269,7 +269,7 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 				return probeResult{attempted: true, reason: "network_abuse_blocked"}
 			}
 			result.effortRejected = isEffortRejection(resp.StatusCode, string(body))
-			if isModelUnavailable(resp.StatusCode, string(body)) {
+			if IsModelUnavailable(resp.StatusCode, string(body)) {
 				result.reason = "model_unavailable"
 			}
 		}
@@ -310,8 +310,13 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 	if !result.success {
 		result.reason = "invalid_or_incomplete_response"
 		if err != nil {
-			result.effortRejected = isEffortRejection(400, err.Error())
-			if isModelUnavailable(400, err.Error()) {
+			message := err.Error()
+			var failure *wire.StreamFailure
+			if errors.As(err, &failure) {
+				message = failure.Type + " " + failure.Message
+			}
+			result.effortRejected = isEffortRejection(400, message)
+			if IsModelUnavailable(400, message) {
 				result.reason = "model_unavailable"
 			}
 		}
@@ -322,10 +327,10 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 	return result
 }
 
-// isModelUnavailable reports whether a 400, 404, 410 or 422 error body says
+// IsModelUnavailable reports whether a 400, 404, 410 or 422 error body says
 // the model itself is unknown, retired or no longer available, as opposed to
 // a transient or credential failure.
-func isModelUnavailable(status int, body string) bool {
+func IsModelUnavailable(status int, body string) bool {
 	if status != 400 && status != 404 && status != 410 && status != 422 {
 		return false
 	}

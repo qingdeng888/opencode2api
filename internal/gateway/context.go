@@ -127,9 +127,9 @@ func injectedToolReserve() int {
 		for _, v1 := range []bool{true, false} {
 			// Render the toolset exactly as it goes on the wire, so the
 			// structural overhead of the shapes is counted too.
-			toolset := officialToolset(wire.Chat, v1)
+			toolset := officialToolset(wire.Chat, v1, "")
 			tokens := estimateJSONTokens(toolset)
-			prompt := opencodeSystemPrompt("", v1)
+			prompt := opencodeSystemPrompt("", v1, nil)
 			tokens += estimateTextTokens(prompt)
 			if tokens > reserve {
 				reserve = tokens

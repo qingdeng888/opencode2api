@@ -147,9 +147,19 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 	cfg := a.manager.Config()
 	endpoint := strings.TrimRight(cfg.Upstream.Go, "/") + "/v1/usage"
 	// Disabled Go keys cannot serve requests, so their quota is neither
-	// meaningful nor worth an upstream query.
+	// meaningful nor worth an upstream query. A saved Go OAuth connection
+	// replaces the manual keys for the Go tier.
 	goKeys := cfg.EnabledGoKeys()
 	accounts := make([]quotaAccount, len(goKeys))
+	if connection := cfg.GoOAuth; connection != nil {
+		goKeys = nil
+		accounts = []quotaAccount{{
+			ID:      config.Fingerprint(connection.Credential.AccountID + "\x00" + connection.Credential.OrganizationID),
+			Display: "Go OAuth", Status: "unavailable", CheckedAt: time.Now().UTC(),
+			Error: "OpenCode 未提供已验证的 OAuth 订阅额度接口，额度保持未知。",
+		}}
+		endpoint = ""
+	}
 	// Coalesce refreshes from multiple browser tabs; at most four upstream
 	// queries run at a time.
 	a.quotaMu.Lock()
@@ -199,9 +209,13 @@ func (a *Server) handleModelQuotas(w http.ResponseWriter, r *http.Request) {
 			models = append(models, modelView{ID: model.Model, Protocol: string(protocol)})
 		}
 	}
+	note := "OpenCode 返回套餐共享额度，未提供逐模型独立余额；多个 Go Key 可能属于同一套餐，不能相加。百分比由上游取整。"
+	if cfg.GoOAuth != nil {
+		note = "OAuth 订阅使用官方 Go 推理路由；未提供已验证的订阅额度接口，不查询手动 Go Key 或按量计费余额。"
+	}
 	httpx.WriteJSON(w, 200, map[string]any{
 		"models": models, "accounts": accounts, "scope": "shared_subscription", "source": endpoint,
 		"cache_seconds": 60, "catalog": a.manager.Resources().Models,
-		"note": "OpenCode 返回套餐共享额度，未提供逐模型独立余额；多个 Go Key 可能属于同一套餐，不能相加。百分比由上游取整。",
+		"note": note,
 	})
 }
